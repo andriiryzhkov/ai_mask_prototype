@@ -47,7 +47,7 @@ cmake --build . --config Release -j 8
 Run command line inference
 
 ```bash
-./bin/sam -t 12 -i ../example.jpg -m ../weights/ggml-model-f16.bin
+./bin/sam_cli -t 12 -i ../example.jpg -m ../weights/ggml-model-f16.bin
 ```
 
 ## License

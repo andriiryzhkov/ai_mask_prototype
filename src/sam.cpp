@@ -1,258 +1,7 @@
 #define _USE_MATH_DEFINES // for M_PI
 #define _CRT_SECURE_NO_DEPRECATE // Disables ridiculous "unsafe" warnigns on Windows
 
-#include "ggml.h"
-#include "ggml-cpu.h"
-#include "ggml-alloc.h"
-#include "ggml-backend.h"
-#define STB_IMAGE_IMPLEMENTATION
-#include "stb_image.h"
-#define STB_IMAGE_WRITE_IMPLEMENTATION
-#include "stb_image_write.h"
-
-#include <cassert>
-#include <cmath>
-#include <cstddef>
-#include <cstdio>
-#include <cstring>
-#include <fstream>
-#include <map>
-#include <string>
-#include <vector>
-#include <thread>
-#include <cinttypes>
-
-#if defined(_MSC_VER)
-#pragma warning(disable: 4244 4267) // possible loss of data
-#endif
-
-// default hparams (ViT-B SAM)
-struct sam_hparams {
-    int32_t n_enc_state               = 768;
-    int32_t n_enc_layer               = 12;
-    int32_t n_enc_head                = 12;
-    int32_t n_enc_out_chans           = 256;
-    int32_t n_pt_embd                 = 4;
-    int32_t n_dec_heads               = 8;
-    int32_t ftype                     = 1;
-    float   mask_threshold            = 0.f;
-    float   iou_threshold             = 0.88f;
-    float   stability_score_threshold = 0.95f;
-    float   stability_score_offset    = 1.0f;
-    float   eps                       = 1e-6f;
-    float   eps_decoder_transformer   = 1e-5f;
-
-    int32_t n_enc_head_dim() const { return n_enc_state / n_enc_head; }
-    int32_t n_img_size()     const { return 1024; }
-    int32_t n_window_size()  const { return 14; }
-    int32_t n_patch_size()   const { return 16; }
-    int32_t n_img_embd()     const { return n_img_size() / n_patch_size(); }
-
-    std::vector<int32_t> global_attn_indices() const {
-        switch (n_enc_state) {
-            case  768: return {  2,  5,  8, 11 };
-            case 1024: return {  5, 11, 17, 23 };
-            case 1280: return {  7, 15, 23, 31 };
-            default:
-                {
-                    fprintf(stderr, "%s: unsupported n_enc_state = %d\n", __func__, n_enc_state);
-                } break;
-        };
-
-        return {};
-    }
-
-    bool is_global_attn(int32_t layer) const {
-        const auto indices = global_attn_indices();
-
-        for (const auto & idx : indices) {
-            if (layer == idx) {
-                return true;
-            }
-        }
-
-        return false;
-    }
-};
-
-struct sam_layer_enc {
-    struct ggml_tensor * norm1_w;
-    struct ggml_tensor * norm1_b;
-
-    struct ggml_tensor * rel_pos_w;
-    struct ggml_tensor * rel_pos_h;
-
-    struct ggml_tensor * qkv_w;
-    struct ggml_tensor * qkv_b;
-
-    struct ggml_tensor * proj_w;
-    struct ggml_tensor * proj_b;
-
-    struct ggml_tensor * norm2_w;
-    struct ggml_tensor * norm2_b;
-
-    struct ggml_tensor * mlp_lin1_w;
-    struct ggml_tensor * mlp_lin1_b;
-
-    struct ggml_tensor * mlp_lin2_w;
-    struct ggml_tensor * mlp_lin2_b;
-};
-
-struct sam_encoder_image {
-    struct ggml_tensor * pe;
-
-    struct ggml_tensor * proj_w;
-    struct ggml_tensor * proj_b;
-
-    struct ggml_tensor * neck_conv_0;
-    struct ggml_tensor * neck_norm_0_w;
-    struct ggml_tensor * neck_norm_0_b;
-    struct ggml_tensor * neck_conv_1;
-    struct ggml_tensor * neck_norm_1_w;
-    struct ggml_tensor * neck_norm_1_b;
-
-    std::vector<sam_layer_enc> layers;
-};
-
-struct sam_encoder_prompt {
-    struct ggml_tensor * pe;
-
-    struct ggml_tensor * not_a_pt_embd_w;
-    std::vector<struct ggml_tensor *> pt_embd;
-
-    struct ggml_tensor * no_mask_embd_w;
-    //std::vector<struct ggml_tensor *> mask_down_w;
-    //std::vector<struct ggml_tensor *> mask_down_b;
-};
-
-struct  sam_layer_dec_transformer_attn {
-    // q_proj
-    struct ggml_tensor * q_w;
-    struct ggml_tensor * q_b;
-
-    // k_proj
-    struct ggml_tensor * k_w;
-    struct ggml_tensor * k_b;
-
-    // v_proj
-    struct ggml_tensor * v_w;
-    struct ggml_tensor * v_b;
-
-    // out_proj
-    struct ggml_tensor * out_w;
-    struct ggml_tensor * out_b;
-};
-
-struct sam_layer_dec_transformer {
-    sam_layer_dec_transformer_attn self_attn;
-
-    // norm1
-    struct ggml_tensor * norm1_w;
-    struct ggml_tensor * norm1_b;
-
-    sam_layer_dec_transformer_attn cross_attn_token_to_img;
-
-    // norm2
-    struct ggml_tensor * norm2_w;
-    struct ggml_tensor * norm2_b;
-
-    // mlp.lin1
-    struct ggml_tensor * mlp_lin1_w;
-    struct ggml_tensor * mlp_lin1_b;
-
-    // mlp.lin2
-    struct ggml_tensor * mlp_lin2_w;
-    struct ggml_tensor * mlp_lin2_b;
-
-    // norm3
-    struct ggml_tensor * norm3_w;
-    struct ggml_tensor * norm3_b;
-
-    // norm4
-    struct ggml_tensor * norm4_w;
-    struct ggml_tensor * norm4_b;
-
-    sam_layer_dec_transformer_attn cross_attn_img_to_token;
-};
-
-struct sam_layer_dec_output_hypernet_mlps {
-    // mlps_*.layers.0
-    struct ggml_tensor * w_0;
-    struct ggml_tensor * b_0;
-
-    // mlps_*.layers.1
-    struct ggml_tensor * w_1;
-    struct ggml_tensor * b_1;
-
-    // mlps_*.layers.2
-    struct ggml_tensor * w_2;
-    struct ggml_tensor * b_2;
-};
-
-struct sam_decoder_mask {
-    std::vector<sam_layer_dec_transformer> transformer_layers;
-
-    // trasnformer.final_attn_token_to_image
-    sam_layer_dec_transformer_attn transformer_final_attn_token_to_img;
-
-    // transformer.norm_final
-    struct ggml_tensor * transformer_norm_final_w;
-    struct ggml_tensor * transformer_norm_final_b;
-
-    // output_upscaling.0
-    struct ggml_tensor * output_upscaling_0_w;
-    struct ggml_tensor * output_upscaling_0_b;
-
-    // output_upscaling.1
-    struct ggml_tensor * output_upscaling_1_w;
-    struct ggml_tensor * output_upscaling_1_b;
-
-    // output_upscaling.3
-    struct ggml_tensor * output_upscaling_3_w;
-    struct ggml_tensor * output_upscaling_3_b;
-
-    // output_hypernetworks_mlps
-    std::vector<sam_layer_dec_output_hypernet_mlps> output_hypernet_mlps;
-
-    // iou_prediction_head.0
-    struct ggml_tensor * iou_prediction_head_0_w;
-    struct ggml_tensor * iou_prediction_head_0_b;
-
-    // iou_prediction_head.1
-    struct ggml_tensor * iou_prediction_head_1_w;
-    struct ggml_tensor * iou_prediction_head_1_b;
-
-    // iou_prediction_head.2
-    struct ggml_tensor * iou_prediction_head_2_w;
-    struct ggml_tensor * iou_prediction_head_2_b;
-
-    // iou_token.weight
-    struct ggml_tensor * iou_token_w;
-
-    // mask_tokens.weight
-    struct ggml_tensor * mask_tokens_w;
-};
-
-
-struct sam_state {
-    struct ggml_tensor * embd_img;
-
-    struct ggml_tensor * low_res_masks;
-    struct ggml_tensor * iou_predictions;
-
-    //struct ggml_tensor * tmp_save = {};
-
-    struct ggml_context * ctx;
-
-    // buffer for `ggml_graph_plan.work_data`
-    std::vector<uint8_t> work_buffer;
-    // buffers to evaluate the model
-    std::vector<uint8_t> buf_compute_img_enc;
-
-    std::vector<uint8_t> buf_compute_fast;
-
-    ggml_gallocr_t       allocr = {};
-};
+#include "sam.h"
 
 // void save_tensor(sam_state& state, struct ggml_tensor * t, struct ggml_cgraph * gf) {
 //     if (!state.tmp_save) {
@@ -261,56 +10,6 @@ struct sam_state {
 //     struct ggml_tensor * tmp0 = ggml_cpy(state.ctx, t, state.tmp_save);
 //     ggml_build_forward_expand(gf, tmp0);
 // }
-
-struct sam_model {
-    sam_hparams hparams;
-
-    sam_encoder_image  enc_img;
-    sam_encoder_prompt enc_prompt;
-    sam_decoder_mask   dec;
-
-    //
-    struct ggml_context * ctx;
-    std::map<std::string, struct ggml_tensor *> tensors;
-};
-
-struct sam_point {
-    float x;
-    float y;
-};
-
-// RGB uint8 image
-struct sam_image_u8 {
-    int nx;
-    int ny;
-
-    std::vector<uint8_t> data;
-};
-
-// RGB float32 image
-// Memory layout: RGBRGBRGB...
-struct sam_image_f32 {
-    int nx;
-    int ny;
-
-    std::vector<float> data;
-};
-
-struct sam_params {
-    int32_t seed      = -1; // RNG seed
-    int32_t n_threads = std::min(4, (int32_t) std::thread::hardware_concurrency());
-
-    std::string model     = "models/sam-vit-b/ggml-model-f16.bin"; // model path
-    std::string fname_inp = "img.jpg";
-    std::string fname_out = "img.out";
-    float   mask_threshold            = 0.f;
-    float   iou_threshold             = 0.88f;
-    float   stability_score_threshold = 0.95f;
-    float   stability_score_offset    = 1.0f;
-    float   eps                       = 1e-6f;
-    float   eps_decoder_transformer   = 1e-5f;
-    sam_point pt = { 414.375f, 162.796875f, };
-};
 
 void print_t_f32(const char* title, struct ggml_tensor * t, int n = 10) {
     printf("%s\n", title);
@@ -394,23 +93,6 @@ static void ggml_sam_cos(struct ggml_tensor * dst , const struct ggml_tensor * s
     }
 }
 
-bool sam_image_load_from_file(const std::string & fname, sam_image_u8 & img) {
-    int nx, ny, nc;
-    auto data = stbi_load(fname.c_str(), &nx, &ny, &nc, 3);
-    if (!data) {
-        fprintf(stderr, "%s: failed to load '%s'\n", __func__, fname.c_str());
-        return false;
-    }
-
-    img.nx = nx;
-    img.ny = ny;
-    img.data.resize(nx * ny * 3);
-    memcpy(img.data.data(), data, nx * ny * 3);
-
-    stbi_image_free(data);
-
-    return true;
-}
 
 // ref: https://github.com/facebookresearch/segment-anything/blob/efeab7296ab579d4a261e554eca80faf6b33924a/segment_anything/modeling/sam.py#L164
 // resize largest dimension to 1024
@@ -485,8 +167,11 @@ bool sam_image_preprocess(const sam_image_u8 & img, sam_image_f32 & res) {
 }
 
 // load the model's weights from a file
-bool sam_model_load(const sam_params & params, sam_model & model) {
+bool sam_model_load(const sam_params & params, sam_model & model, sam_state & state) {
     fprintf(stderr, "%s: loading model from '%s' - please wait ...\n", __func__, params.model.c_str());
+
+    ggml_time_init();
+    const int64_t t_start_ms = ggml_time_ms();
 
     auto fin = std::ifstream(params.model, std::ios::binary);
     if (!fin) {
@@ -1105,6 +790,8 @@ bool sam_model_load(const sam_params & params, sam_model & model) {
 
     fin.close();
 
+    state.t_load_ms = ggml_time_ms() - t_start_ms;
+    fprintf(stderr, "%s: load time %i ms\n", __func__, state.t_load_ms);
     return true;
 }
 
@@ -1774,11 +1461,18 @@ bool sam_decode_mask(
     return true;
 }
 
-bool sam_write_masks(const sam_hparams& hparams, int nx, int ny, const sam_state & state, const std::string & fname) {
-    if (state.low_res_masks->ne[2] == 0) return true;
+std::vector<sam_image_u8> sam_postprocess_masks(
+    const sam_hparams& hparams,
+    int nx,
+    int ny,
+    const sam_state & state,
+    int mask_on_val,
+    int mask_off_val) {
+
+    if (state.low_res_masks->ne[2] == 0) return {};
     if (state.low_res_masks->ne[2] != state.iou_predictions->ne[0]) {
         printf("Error: number of masks (%d) does not match number of iou predictions (%d)\n", (int)state.low_res_masks->ne[2], (int)state.iou_predictions->ne[0]);
-        return false;
+        return {};
     }
 
     const int n_img_size = hparams.n_img_size();
@@ -1807,6 +1501,7 @@ bool sam_write_masks(const sam_hparams& hparams, int nx, int ny, const sam_state
 
     const auto iou_data = (float*)state.iou_predictions->data;
 
+    std::map<float, sam_image_u8, std::greater<float>> res_map;
     for (int i = 0; i < ne2; ++i) {
         if (iou_threshold > 0.f && iou_data[i] < iou_threshold) {
             printf("Skipping mask %d with iou %f below threshold %f\n", i, iou_data[i], iou_threshold);
@@ -1863,7 +1558,7 @@ bool sam_write_masks(const sam_hparams& hparams, int nx, int ny, const sam_state
 
             res.nx = nx;
             res.ny = ny;
-            res.data.resize(nx*ny);
+            res.data.resize(nx*ny, mask_off_val);
 
             for (int iy = 0; iy < ny; ++iy) {
                 for (int ix = 0; ix < nx; ++ix) {
@@ -1906,7 +1601,7 @@ bool sam_write_masks(const sam_hparams& hparams, int nx, int ny, const sam_state
                         min_ix = std::min(min_ix, ix);
                         max_ix = std::max(max_ix, ix);
 
-                        res.data[iy*nx + ix] = 255;
+                        res.data[iy*nx + ix] = mask_on_val;
                     }
                 }
             }
@@ -1921,15 +1616,15 @@ bool sam_write_masks(const sam_hparams& hparams, int nx, int ny, const sam_state
         printf("Mask %d: iou = %f, stability_score = %f, bbox (%d, %d), (%d, %d)\n",
                 i, iou_data[i], stability_score, min_ix, max_ix, min_iy, max_iy);
 
-        std::string filename = fname + std::to_string(i) + ".png";
-        if (!stbi_write_png(filename.c_str(), res.nx, res.ny, 1, res.data.data(), res.nx)) {
-            printf("%s: failed to write mask %s\n", __func__, filename.c_str());
-            return false;
-        }
+        res_map[iou_data[i] + stability_score] = std::move(res);
     }
 
+    std::vector<sam_image_u8> res;
+    for (auto& mask : res_map) {
+        res.push_back(std::move(mask.second));
+    }
 
-    return true;
+    return res;
 }
 
 struct ggml_cgraph  * sam_build_fast_graph(
@@ -2018,216 +1713,135 @@ struct ggml_cgraph  * sam_build_fast_graph(
     return gf;
 }
 
-void sam_print_usage(int argc, char ** argv, const sam_params & params) {
-    fprintf(stderr, "usage: %s [options]\n", argv[0]);
-    fprintf(stderr, "\n");
-    fprintf(stderr, "options:\n");
-    fprintf(stderr, "  -h, --help            show this help message and exit\n");
-    fprintf(stderr, "  -s SEED, --seed SEED  RNG seed (default: -1)\n");
-    fprintf(stderr, "  -t N, --threads N     number of threads to use during computation (default: %d)\n", params.n_threads);
-    fprintf(stderr, "  -m FNAME, --model FNAME\n");
-    fprintf(stderr, "                        model path (default: %s)\n", params.model.c_str());
-    fprintf(stderr, "  -i FNAME, --inp FNAME\n");
-    fprintf(stderr, "                        input file (default: %s)\n", params.fname_inp.c_str());
-    fprintf(stderr, "  -o FNAME, --out FNAME\n");
-    fprintf(stderr, "                        mask file name prefix (default: %s)\n", params.fname_out.c_str());
-    fprintf(stderr, "SAM hyperparameters:\n");
-    fprintf(stderr, "  -mt FLOAT, --mask-threshold\n");
-    fprintf(stderr, "                        mask threshold (default: %f)\n", params.mask_threshold);
-    fprintf(stderr, "  -it FLOAT, --iou-threshold\n");
-    fprintf(stderr, "                        iou threshold (default: %f)\n", params.iou_threshold);
-    fprintf(stderr, "  -st FLOAT, --score-threshold\n");
-    fprintf(stderr, "                        score threshold (default: %f)\n", params.stability_score_threshold);
-    fprintf(stderr, "  -so FLOAT, --score-offset\n");
-    fprintf(stderr, "                        score offset (default: %f)\n", params.stability_score_offset);
-    fprintf(stderr, "  -e FLOAT, --epsilon\n");
-    fprintf(stderr, "                        epsilon (default: %f)\n", params.eps);
-    fprintf(stderr, "  -ed FLOAT, --epsilon-decoder-transformer\n");
-    fprintf(stderr, "                        epsilon decoder transformer (default: %f)\n", params.eps_decoder_transformer);
-    fprintf(stderr, "SAM prompt:\n");
-    fprintf(stderr, "  -p TUPLE, --point-prompt\n");
-    fprintf(stderr, "                        point to be used as prompt for SAM (default: %f,%f). Must be in a format FLOAT,FLOAT \n", params.pt.x, params.pt.y);
-    fprintf(stderr, "\n");
-}
+bool sam_compute_embd_img(
+        sam_image_u8 & img,
+        int n_threads ,
+        const sam_model & model,
+        sam_state & state) {
 
-bool sam_params_parse(int argc, char ** argv, sam_params & params) {
-    for (int i = 1; i < argc; i++) {
-        std::string arg = argv[i];
-
-        if (arg == "-s" || arg == "--seed") {
-            params.seed = std::stoi(argv[++i]);
-        } else if (arg == "-t" || arg == "--threads") {
-            params.n_threads = std::stoi(argv[++i]);
-        } else if (arg == "-m" || arg == "--model") {
-            params.model = argv[++i];
-        } else if (arg == "-i" || arg == "--inp") {
-            params.fname_inp = argv[++i];
-        } else if (arg == "-o" || arg == "--out") {
-            params.fname_out = argv[++i];
-        } else if (arg == "-mt" || arg == "--mask-threshold") {
-            params.mask_threshold = std::stof(argv[++i]);
-        } else if (arg == "-it" || arg == "--iou-threshold") {
-            params.iou_threshold = std::stof(argv[++i]);
-        } else if (arg == "-st" || arg == "--score-threshold") {
-            params.stability_score_threshold = std::stof(argv[++i]);
-        } else if (arg == "-so" || arg == "--score-offset") {
-            params.stability_score_offset = std::stof(argv[++i]);
-        } else if (arg == "-e" || arg == "--epsilon") {
-            params.eps = std::stof(argv[++i]);
-        } else if (arg == "-ed" || arg == "--epsilon-decoder-transformer") {
-            params.eps_decoder_transformer = std::stof(argv[++i]);
-        } else if (arg == "-p" || arg == "--point-prompt") {
-            // TODO multiple points per model invocation
-            char* point = argv[++i];
-
-            char* coord = strtok(point, ",");
-            if (!coord){
-                fprintf(stderr, "Error while parsing prompt!\n");
-                exit(1);
-            }
-            params.pt.x = std::stof(coord);
-            coord = strtok(NULL, ",");
-            if (!coord){
-                fprintf(stderr, "Error while parsing prompt!\n");
-                exit(1);
-            }
-            params.pt.y = std::stof(coord);
-        } else if (arg == "-h" || arg == "--help") {
-            sam_print_usage(argc, argv, params);
-            exit(0);
-        } else {
-            fprintf(stderr, "error: unknown argument: %s\n", arg.c_str());
-            sam_print_usage(argc, argv, params);
-            exit(0);
-        }
+    if (!model.ctx || !state.ctx) {
+        fprintf(stderr, "%s: model or state is not initialized\n", __func__);
+        return false;
     }
 
-    return true;
-}
-
-int main(int argc, char ** argv) {
-    const int64_t t_main_start_us = ggml_time_us();
-
-    sam_params params;
-    params.model = "models/sam-vit-b/ggml-model-f16.bin";
-
-    sam_model model;
-    sam_state state;
-    int64_t t_load_us = 0;
-
-    if (sam_params_parse(argc, argv, params) == false) {
-        return 1;
-    }
-
-    if (params.seed < 0) {
-        params.seed = time(NULL);
-    }
-    fprintf(stderr, "%s: seed = %d\n", __func__, params.seed);
-
-    // load the image
-    sam_image_u8 img0;
-    if (!sam_image_load_from_file(params.fname_inp, img0)) {
-        fprintf(stderr, "%s: failed to load image from '%s'\n", __func__, params.fname_inp.c_str());
-        return 1;
-    }
-    fprintf(stderr, "%s: loaded image '%s' (%d x %d)\n", __func__, params.fname_inp.c_str(), img0.nx, img0.ny);
+    const int64_t t_start_ms = ggml_time_ms();
 
     // preprocess to f32
     sam_image_f32 img1;
-    if (!sam_image_preprocess(img0, img1)) {
+    if (!sam_image_preprocess(img, img1)) {
         fprintf(stderr, "%s: failed to preprocess image\n", __func__);
         return 1;
     }
     fprintf(stderr, "%s: preprocessed image (%d x %d)\n", __func__, img1.nx, img1.ny);
+ 
+    //
+    static size_t buf_size = 256u*1024*1024;
 
+    // if (state.ctx) {
+    //     ggml_free(state.ctx);
+    //     state.ctx = nullptr;
+    // }
 
-    // load the model
-    {
-        const int64_t t_start_us = ggml_time_us();
+    struct ggml_init_params ggml_params = {
+        /*.mem_size   =*/ buf_size,
+        /*.mem_buffer =*/ NULL,
+        /*.no_alloc   =*/ false,
+    };
 
-        if (!sam_model_load(params, model)) {
-            fprintf(stderr, "%s: failed to load model from '%s'\n", __func__, params.model.c_str());
-            return 1;
-        }
+    state.ctx = ggml_init(ggml_params);
 
-        t_load_us = ggml_time_us() - t_start_us;
+    state.embd_img = ggml_new_tensor_3d(state.ctx, GGML_TYPE_F32,
+            model.hparams.n_img_embd(), model.hparams.n_img_embd(), model.hparams.n_enc_out_chans);
+
+    // Encode the image
+    state.buf_compute_img_enc.resize(ggml_tensor_overhead()*GGML_DEFAULT_GRAPH_SIZE + ggml_graph_overhead());
+    state.allocr = ggml_gallocr_new(ggml_backend_cpu_buffer_type());
+
+    struct ggml_cgraph  * gf = sam_encode_image(model, state, img1);
+    if (!gf) {
+        fprintf(stderr, "%s: failed to encode image\n", __func__);
+        return false;
     }
 
-    {
-        static size_t buf_size = 256u*1024*1024;
+    ggml_graph_compute_helper(state.work_buffer, gf, n_threads);
 
-        struct ggml_init_params ggml_params = {
-            /*.mem_size   =*/ buf_size,
-            /*.mem_buffer =*/ NULL,
-            /*.no_alloc   =*/ false,
-        };
+    print_t_f32("embd_img", state.embd_img);
 
-        state.ctx = ggml_init(ggml_params);
+    ggml_gallocr_free(state.allocr);
+    state.allocr = NULL;
+    state.work_buffer.clear();
+    
+    state.t_compute_img_ms = ggml_time_ms() - t_start_ms;
+    fprintf(stderr, "%s: image encoding time %i ms\n", __func__, state.t_compute_img_ms);
 
-        state.embd_img = ggml_new_tensor_3d(state.ctx, GGML_TYPE_F32,
-                model.hparams.n_img_embd(), model.hparams.n_img_embd(), model.hparams.n_enc_out_chans);
+    return true;
+}
 
-        state.low_res_masks = ggml_new_tensor_3d(state.ctx, GGML_TYPE_F32,
-                model.hparams.n_enc_out_chans, model.hparams.n_enc_out_chans, 3);
+std::vector<sam_image_u8> sam_compute_masks(
+        sam_image_u8 & img,
+        int n_threads,
+        sam_point pt,
+        const sam_model & model,
+        sam_state & state,
+        int mask_on_val,
+        int mask_off_val) {
 
-        state.iou_predictions = ggml_new_tensor_1d(state.ctx, GGML_TYPE_F32, 3);
+    if (!model.ctx || !state.ctx) {
+        fprintf(stderr, "%s: model or state is not initialized\n", __func__);
+        return {};
     }
 
+    const int64_t t_start_ms = ggml_time_ms();
 
-    {
-        state.buf_compute_img_enc.resize(ggml_tensor_overhead()*GGML_DEFAULT_GRAPH_SIZE + ggml_graph_overhead());
-        state.allocr = ggml_gallocr_new(ggml_backend_cpu_buffer_type());
+    static size_t buf_size = 256u*1024*1024;
 
-        struct ggml_cgraph  * gf = sam_encode_image(model, state, img1);
-        if (!gf) {
-            fprintf(stderr, "%s: failed to encode image\n", __func__);
-            return 1;
-        }
+    struct ggml_init_params ggml_params = {
+        /*.mem_size   =*/ buf_size,
+        /*.mem_buffer =*/ NULL,
+        /*.no_alloc   =*/ false,
+    };
 
-        ggml_graph_compute_helper(state.work_buffer, gf, params.n_threads);
+    // state.ctx = ggml_init(ggml_params);
 
-        print_t_f32("embd_img", state.embd_img);
+    state.low_res_masks = ggml_new_tensor_3d(state.ctx, GGML_TYPE_F32,
+            model.hparams.n_enc_out_chans, model.hparams.n_enc_out_chans, 3);
 
-        ggml_gallocr_free(state.allocr);
-        state.allocr = NULL;
-        state.work_buffer.clear();
-    }
-    {
-        state.buf_compute_fast.resize(ggml_tensor_overhead()*GGML_DEFAULT_GRAPH_SIZE + ggml_graph_overhead());
-        state.allocr = ggml_gallocr_new(ggml_backend_cpu_buffer_type());
+    state.iou_predictions = ggml_new_tensor_1d(state.ctx, GGML_TYPE_F32, 3);
 
-        // TODO: more varied prompts
-        fprintf(stderr, "prompt: (%f, %f)\n", params.pt.x, params.pt.y);
 
-        struct ggml_cgraph  * gf = sam_build_fast_graph(model, state, img0.nx, img0.ny, params.pt);
-        if (!gf) {
-            fprintf(stderr, "%s: failed to build fast graph\n", __func__);
-            return 1;
-        }
 
-        ggml_graph_compute_helper(state.work_buffer, gf, params.n_threads);
+    state.buf_compute_fast.resize(ggml_tensor_overhead()*GGML_DEFAULT_GRAPH_SIZE + ggml_graph_overhead());
+    state.allocr = ggml_gallocr_new(ggml_backend_cpu_buffer_type());
 
-        //print_t_f32("iou_predictions", state.iou_predictions);
-        //print_t_f32("low_res_masks", state.low_res_masks);
-        ggml_gallocr_free(state.allocr);
-        state.allocr = NULL;
+    // TODO: more varied prompts
+    fprintf(stderr, "prompt: (%f, %f)\n", pt.x, pt.y);
+
+    struct ggml_cgraph  * gf = sam_build_fast_graph(model, state, img.nx, img.ny, pt);
+    if (!gf) {
+        fprintf(stderr, "%s: failed to build fast graph\n", __func__);
+        return {};
     }
 
-    if (!sam_write_masks(model.hparams, img0.nx, img0.ny, state, params.fname_out)) {
-        fprintf(stderr, "%s: failed to write masks\n", __func__);
-        return 1;
-    }
+    ggml_graph_compute_helper(state.work_buffer, gf, n_threads);
 
-    // report timing
-    {
-        const int64_t t_main_end_us = ggml_time_us();
+    //print_t_f32("iou_predictions", state.iou_predictions);
+    //print_t_f32("low_res_masks", state.low_res_masks);
 
-        fprintf(stderr, "\n\n");
-        fprintf(stderr, "%s:     load time = %8.2f ms\n", __func__, t_load_us/1000.0f);
-        fprintf(stderr, "%s:    total time = %8.2f ms\n", __func__, (t_main_end_us - t_main_start_us)/1000.0f);
-    }
+    std::vector<sam_image_u8> masks = sam_postprocess_masks(model.hparams,
+            img.nx, img.ny, state, mask_on_val, mask_off_val);
+
+    ggml_gallocr_free(state.allocr);
+    state.allocr = NULL;
+
+    state.t_compute_masks_ms = ggml_time_ms() - t_start_ms;
+    fprintf(stderr, "%s: mask compute time %i ms\n", __func__, state.t_compute_masks_ms);
+
+    return masks;
+}
+
+void sam_deinit(
+        const sam_model & model,
+        sam_state & state) {
 
     ggml_free(model.ctx);
-
-    return 0;
 }
