@@ -60,3 +60,4 @@ GPL3
 - [ggml](https://github.com/ggerganov/ggml)
 - [SAM](https://segment-anything.com/)
 - [SAM demo](https://segment-anything.com/demo)
+- [sam.cpp](https://github.com/YavorGIvanov/sam.cpp)
