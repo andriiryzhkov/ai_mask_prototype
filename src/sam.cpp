@@ -3,6 +3,271 @@
 
 #include "sam.h"
 
+#include "ggml.h"
+#include "ggml-cpu.h"
+#include "ggml-alloc.h"
+#include "ggml-backend.h"
+
+#include <cassert>
+#include <cmath>
+#include <cstddef>
+#include <cstdio>
+#include <cstring>
+#include <fstream>
+#include <map>
+
+#if defined(_MSC_VER)
+#pragma warning(disable: 4244 4267) // possible loss of data
+#endif
+
+// default hparams (ViT-B SAM)
+struct sam_hparams {
+    int32_t n_enc_state               = 768;
+    int32_t n_enc_layer               = 12;
+    int32_t n_enc_head                = 12;
+    int32_t n_enc_out_chans           = 256;
+    int32_t n_pt_embd                 = 4;
+    int32_t n_dec_heads               = 8;
+    int32_t ftype                     = 1;
+    float   mask_threshold            = 0.f;
+    float   iou_threshold             = 0.88f;
+    float   stability_score_threshold = 0.95f;
+    float   stability_score_offset    = 1.0f;
+    float   eps                       = 1e-6f;
+    float   eps_decoder_transformer   = 1e-5f;
+
+    int32_t n_enc_head_dim() const { return n_enc_state / n_enc_head; }
+    int32_t n_img_size()     const { return 1024; }
+    int32_t n_window_size()  const { return 14; }
+    int32_t n_patch_size()   const { return 16; }
+    int32_t n_img_embd()     const { return n_img_size() / n_patch_size(); }
+
+    std::vector<int32_t> global_attn_indices() const {
+        switch (n_enc_state) {
+            case  768: return {  2,  5,  8, 11 };
+            case 1024: return {  5, 11, 17, 23 };
+            case 1280: return {  7, 15, 23, 31 };
+            default:
+                {
+                    fprintf(stderr, "%s: unsupported n_enc_state = %d\n", __func__, n_enc_state);
+                } break;
+        };
+
+        return {};
+    }
+
+    bool is_global_attn(int32_t layer) const {
+        const auto indices = global_attn_indices();
+
+        for (const auto & idx : indices) {
+            if (layer == idx) {
+                return true;
+            }
+        }
+
+        return false;
+    }
+};
+
+struct sam_layer_enc {
+    struct ggml_tensor * norm1_w;
+    struct ggml_tensor * norm1_b;
+
+    struct ggml_tensor * rel_pos_w;
+    struct ggml_tensor * rel_pos_h;
+
+    struct ggml_tensor * qkv_w;
+    struct ggml_tensor * qkv_b;
+
+    struct ggml_tensor * proj_w;
+    struct ggml_tensor * proj_b;
+
+    struct ggml_tensor * norm2_w;
+    struct ggml_tensor * norm2_b;
+
+    struct ggml_tensor * mlp_lin1_w;
+    struct ggml_tensor * mlp_lin1_b;
+
+    struct ggml_tensor * mlp_lin2_w;
+    struct ggml_tensor * mlp_lin2_b;
+};
+
+struct sam_encoder_image {
+    struct ggml_tensor * pe;
+
+    struct ggml_tensor * proj_w;
+    struct ggml_tensor * proj_b;
+
+    struct ggml_tensor * neck_conv_0;
+    struct ggml_tensor * neck_norm_0_w;
+    struct ggml_tensor * neck_norm_0_b;
+    struct ggml_tensor * neck_conv_1;
+    struct ggml_tensor * neck_norm_1_w;
+    struct ggml_tensor * neck_norm_1_b;
+
+    std::vector<sam_layer_enc> layers;
+};
+
+struct sam_encoder_prompt {
+    struct ggml_tensor * pe;
+
+    struct ggml_tensor * not_a_pt_embd_w;
+    std::vector<struct ggml_tensor *> pt_embd;
+
+    struct ggml_tensor * no_mask_embd_w;
+    //std::vector<struct ggml_tensor *> mask_down_w;
+    //std::vector<struct ggml_tensor *> mask_down_b;
+};
+
+struct  sam_layer_dec_transformer_attn {
+    // q_proj
+    struct ggml_tensor * q_w;
+    struct ggml_tensor * q_b;
+
+    // k_proj
+    struct ggml_tensor * k_w;
+    struct ggml_tensor * k_b;
+
+    // v_proj
+    struct ggml_tensor * v_w;
+    struct ggml_tensor * v_b;
+
+    // out_proj
+    struct ggml_tensor * out_w;
+    struct ggml_tensor * out_b;
+};
+
+struct sam_layer_dec_transformer {
+    sam_layer_dec_transformer_attn self_attn;
+
+    // norm1
+    struct ggml_tensor * norm1_w;
+    struct ggml_tensor * norm1_b;
+
+    sam_layer_dec_transformer_attn cross_attn_token_to_img;
+
+    // norm2
+    struct ggml_tensor * norm2_w;
+    struct ggml_tensor * norm2_b;
+
+    // mlp.lin1
+    struct ggml_tensor * mlp_lin1_w;
+    struct ggml_tensor * mlp_lin1_b;
+
+    // mlp.lin2
+    struct ggml_tensor * mlp_lin2_w;
+    struct ggml_tensor * mlp_lin2_b;
+
+    // norm3
+    struct ggml_tensor * norm3_w;
+    struct ggml_tensor * norm3_b;
+
+    // norm4
+    struct ggml_tensor * norm4_w;
+    struct ggml_tensor * norm4_b;
+
+    sam_layer_dec_transformer_attn cross_attn_img_to_token;
+};
+
+struct sam_layer_dec_output_hypernet_mlps {
+    // mlps_*.layers.0
+    struct ggml_tensor * w_0;
+    struct ggml_tensor * b_0;
+
+    // mlps_*.layers.1
+    struct ggml_tensor * w_1;
+    struct ggml_tensor * b_1;
+
+    // mlps_*.layers.2
+    struct ggml_tensor * w_2;
+    struct ggml_tensor * b_2;
+};
+
+struct sam_decoder_mask {
+    std::vector<sam_layer_dec_transformer> transformer_layers;
+
+    // trasnformer.final_attn_token_to_image
+    sam_layer_dec_transformer_attn transformer_final_attn_token_to_img;
+
+    // transformer.norm_final
+    struct ggml_tensor * transformer_norm_final_w;
+    struct ggml_tensor * transformer_norm_final_b;
+
+    // output_upscaling.0
+    struct ggml_tensor * output_upscaling_0_w;
+    struct ggml_tensor * output_upscaling_0_b;
+
+    // output_upscaling.1
+    struct ggml_tensor * output_upscaling_1_w;
+    struct ggml_tensor * output_upscaling_1_b;
+
+    // output_upscaling.3
+    struct ggml_tensor * output_upscaling_3_w;
+    struct ggml_tensor * output_upscaling_3_b;
+
+    // output_hypernetworks_mlps
+    std::vector<sam_layer_dec_output_hypernet_mlps> output_hypernet_mlps;
+
+    // iou_prediction_head.0
+    struct ggml_tensor * iou_prediction_head_0_w;
+    struct ggml_tensor * iou_prediction_head_0_b;
+
+    // iou_prediction_head.1
+    struct ggml_tensor * iou_prediction_head_1_w;
+    struct ggml_tensor * iou_prediction_head_1_b;
+
+    // iou_prediction_head.2
+    struct ggml_tensor * iou_prediction_head_2_w;
+    struct ggml_tensor * iou_prediction_head_2_b;
+
+    // iou_token.weight
+    struct ggml_tensor * iou_token_w;
+
+    // mask_tokens.weight
+    struct ggml_tensor * mask_tokens_w;
+};
+
+struct sam_ggml_model {
+    sam_hparams hparams;
+
+    sam_encoder_image  enc_img;
+    sam_encoder_prompt enc_prompt;
+    sam_decoder_mask   dec;
+
+    //
+    struct ggml_context * ctx;
+    std::map<std::string, struct ggml_tensor *> tensors;
+};
+
+struct sam_ggml_state {
+    struct ggml_tensor * embd_img = {};
+    struct ggml_context * ctx_img = {};
+
+    struct ggml_tensor * low_res_masks;
+    struct ggml_tensor * iou_predictions;
+    struct ggml_context * ctx_masks = {};
+
+    //struct ggml_tensor * tmp_save = {};
+
+    // buffer for `ggml_graph_plan.work_data`
+    std::vector<uint8_t> work_buffer;
+    // buffers to evaluate the model
+    std::vector<uint8_t> buf_compute_img_enc;
+
+    std::vector<uint8_t> buf_compute_fast;
+
+    ggml_gallocr_t       allocr = {};
+};
+
+// RGB float32 image
+// Memory layout: RGBRGBRGB...
+struct sam_image_f32 {
+    int nx;
+    int ny;
+
+    std::vector<float> data;
+};
+
 // void save_tensor(sam_state& state, struct ggml_tensor * t, struct ggml_cgraph * gf) {
 //     if (!state.tmp_save) {
 //         state.tmp_save = ggml_new_tensor(state.ctx, t->type, t->n_dims, t->ne);
@@ -167,11 +432,8 @@ bool sam_image_preprocess(const sam_image_u8 & img, sam_image_f32 & res) {
 }
 
 // load the model's weights from a file
-bool sam_model_load(const sam_params & params, sam_model & model, sam_state & state) {
+bool sam_ggml_model_load(const sam_params & params, sam_ggml_model & model) {
     fprintf(stderr, "%s: loading model from '%s' - please wait ...\n", __func__, params.model.c_str());
-
-    ggml_time_init();
-    const int64_t t_start_ms = ggml_time_ms();
 
     auto fin = std::ifstream(params.model, std::ios::binary);
     if (!fin) {
@@ -790,16 +1052,15 @@ bool sam_model_load(const sam_params & params, sam_model & model, sam_state & st
 
     fin.close();
 
-    state.t_load_ms = ggml_time_ms() - t_start_ms;
-    fprintf(stderr, "%s: load time %i ms\n", __func__, state.t_load_ms);
     return true;
 }
 
 struct ggml_tensor * sam_fill_dense_pe(
-            const sam_model   & model,
+         const sam_ggml_model & model,
           struct ggml_context * ctx0,
-          struct ggml_cgraph  * gf,
-                  sam_state   & state) {
+           struct ggml_cgraph * gf,
+               sam_ggml_state & state) {
+
     const auto & hparams = model.hparams;
     const auto & enc     = model.enc_prompt;
 
@@ -855,8 +1116,8 @@ struct ggml_tensor* sam_layer_norm_2d(
 }
 
 struct ggml_cgraph  * sam_encode_image(
-            const sam_model & model,
-                  sam_state & state,
+            const sam_ggml_model & model,
+                  sam_ggml_state & state,
         const sam_image_f32 & img) {
 
     const auto & hparams = model.hparams;
@@ -1090,10 +1351,10 @@ struct prompt_encoder_result {
 // TODO: currently just encode a single point for simplicity
 //
 prompt_encoder_result sam_encode_prompt(
-        const sam_model     & model,
+       const sam_ggml_model & model,
         struct ggml_context * ctx0,
-        struct ggml_cgraph  * gf,
-                  sam_state & state) {
+         struct ggml_cgraph * gf,
+             sam_ggml_state & state) {
 
     const auto & hparams = model.hparams;
     const auto & enc = model.enc_prompt;
@@ -1154,7 +1415,7 @@ struct ggml_tensor* sam_decode_mask_transformer_attn(
                       struct ggml_tensor * keys,
                       struct ggml_tensor * values,
                      struct ggml_context * ctx0,
-                         const sam_model & model) {
+                    const sam_ggml_model & model) {
     const auto & hparams = model.hparams;
     const int n_head = hparams.n_dec_heads;
 
@@ -1230,12 +1491,12 @@ struct ggml_tensor * sam_decode_mask_mlp_relu_3(
 }
 
 bool sam_decode_mask(
-                    const sam_model & model,
+               const sam_ggml_model & model,
         const prompt_encoder_result & prompt,
                  struct ggml_tensor * pe_img,
                 struct ggml_context * ctx0,
                 struct ggml_cgraph  * gf,
-                          sam_state & state) {
+                     sam_ggml_state & state) {
 
     const auto & hparams = model.hparams;
     const auto & dec = model.dec;
@@ -1447,10 +1708,10 @@ bool sam_decode_mask(
 
     // Select the correct mask or masks for output
     // ref: https://github.com/facebookresearch/segment-anything/blob/6fdee8f2727f4506cfbbe553e23b895e27956588/segment_anything/modeling/mask_decoder.py#L101
-    iou_pred = ggml_cpy(state.ctx, ggml_view_1d(ctx0, iou_pred, iou_pred->ne[0] - 1, iou_pred->nb[0]), state.iou_predictions);
+    iou_pred = ggml_cpy(state.ctx_masks, ggml_view_1d(ctx0, iou_pred, iou_pred->ne[0] - 1, iou_pred->nb[0]), state.iou_predictions);
     masks = ggml_view_4d(ctx0, masks, masks->ne[0], masks->ne[1], masks->ne[2] - 1, masks->ne[3],
                                       masks->nb[1], masks->nb[2], masks->nb[3], masks->nb[2] /* offset*/);
-    masks = ggml_cpy(state.ctx, masks, state.low_res_masks);
+    masks = ggml_cpy(state.ctx_masks, masks, state.low_res_masks);
 
     ggml_build_forward_expand(gf, masks);
     ggml_build_forward_expand(gf, iou_pred);
@@ -1462,12 +1723,12 @@ bool sam_decode_mask(
 }
 
 std::vector<sam_image_u8> sam_postprocess_masks(
-    const sam_hparams& hparams,
-    int nx,
-    int ny,
-    const sam_state & state,
-    int mask_on_val,
-    int mask_off_val) {
+       const sam_hparams & hparams,
+                     int   nx,
+                     int   ny,
+    const sam_ggml_state & state,
+                     int   mask_on_val,
+                     int   mask_off_val) {
 
     if (state.low_res_masks->ne[2] == 0) return {};
     if (state.low_res_masks->ne[2] != state.iou_predictions->ne[0]) {
@@ -1628,8 +1889,8 @@ std::vector<sam_image_u8> sam_postprocess_masks(
 }
 
 struct ggml_cgraph  * sam_build_fast_graph(
-        const sam_model     & model,
-                  sam_state & state,
+       const sam_ggml_model & model,
+             sam_ggml_state & state,
                         int   nx,
                         int   ny,
                   sam_point   point) {
@@ -1713,14 +1974,31 @@ struct ggml_cgraph  * sam_build_fast_graph(
     return gf;
 }
 
+std::shared_ptr<sam_state> sam_load_model(
+        const sam_params & params) {
+
+    ggml_time_init();
+    const int64_t t_start_ms = ggml_time_ms();
+
+    sam_state state;
+    state.model = std::make_unique<sam_ggml_model>();
+    state.state = std::make_unique<sam_ggml_state>();
+    if (!sam_ggml_model_load(params, *state.model)) {
+        fprintf(stderr, "%s: failed to load model from '%s'\n", __func__, params.model.c_str());
+        return {};
+    }
+
+    state.t_load_ms = ggml_time_ms() - t_start_ms;
+
+    return std::make_unique<sam_state>(std::move(state));
+}
+
 bool sam_compute_embd_img(
         sam_image_u8 & img,
-        int n_threads ,
-        const sam_model & model,
-        sam_state & state) {
+                 int   n_threads ,
+           sam_state & state) {
 
-    if (!model.ctx || !state.ctx) {
-        fprintf(stderr, "%s: model or state is not initialized\n", __func__);
+    if (!state.model || !state.state) {
         return false;
     }
 
@@ -1737,10 +2015,13 @@ bool sam_compute_embd_img(
     //
     static size_t buf_size = 256u*1024*1024;
 
-    // if (state.ctx) {
-    //     ggml_free(state.ctx);
-    //     state.ctx = nullptr;
-    // }
+    auto& st = *state.state;
+    auto& model = *state.model;
+
+    if (st.ctx_img) {
+        ggml_free(st.ctx_img);
+        st.ctx_img = {};
+    }
 
     struct ggml_init_params ggml_params = {
         /*.mem_size   =*/ buf_size,
@@ -1748,28 +2029,28 @@ bool sam_compute_embd_img(
         /*.no_alloc   =*/ false,
     };
 
-    state.ctx = ggml_init(ggml_params);
+    st.ctx_img = ggml_init(ggml_params);
 
-    state.embd_img = ggml_new_tensor_3d(state.ctx, GGML_TYPE_F32,
+    st.embd_img = ggml_new_tensor_3d(st.ctx_img, GGML_TYPE_F32,
             model.hparams.n_img_embd(), model.hparams.n_img_embd(), model.hparams.n_enc_out_chans);
 
     // Encode the image
-    state.buf_compute_img_enc.resize(ggml_tensor_overhead()*GGML_DEFAULT_GRAPH_SIZE + ggml_graph_overhead());
-    state.allocr = ggml_gallocr_new(ggml_backend_cpu_buffer_type());
+    st.buf_compute_img_enc.resize(ggml_tensor_overhead()*GGML_DEFAULT_GRAPH_SIZE + ggml_graph_overhead());
+    st.allocr = ggml_gallocr_new(ggml_backend_cpu_buffer_type());
 
-    struct ggml_cgraph  * gf = sam_encode_image(model, state, img1);
+    struct ggml_cgraph  * gf = sam_encode_image(model, st, img1);
     if (!gf) {
         fprintf(stderr, "%s: failed to encode image\n", __func__);
         return false;
     }
 
-    ggml_graph_compute_helper(state.work_buffer, gf, n_threads);
+    ggml_graph_compute_helper(st.work_buffer, gf, n_threads);
 
-    print_t_f32("embd_img", state.embd_img);
+    print_t_f32("embd_img", st.embd_img);
 
-    ggml_gallocr_free(state.allocr);
-    state.allocr = NULL;
-    state.work_buffer.clear();
+    ggml_gallocr_free(st.allocr);
+    st.allocr = NULL;
+    st.work_buffer.clear();
     
     state.t_compute_img_ms = ggml_time_ms() - t_start_ms;
     fprintf(stderr, "%s: image encoding time %i ms\n", __func__, state.t_compute_img_ms);
@@ -1779,14 +2060,13 @@ bool sam_compute_embd_img(
 
 std::vector<sam_image_u8> sam_compute_masks(
         sam_image_u8 & img,
-        int n_threads,
-        sam_point pt,
-        const sam_model & model,
-        sam_state & state,
-        int mask_on_val,
-        int mask_off_val) {
+                 int   n_threads,
+           sam_point   pt,
+           sam_state & state,
+                 int   mask_on_val,
+                 int   mask_off_val) {
 
-    if (!model.ctx || !state.ctx) {
+    if (!state.model || !state.state) {
         fprintf(stderr, "%s: model or state is not initialized\n", __func__);
         return {};
     }
@@ -1801,37 +2081,45 @@ std::vector<sam_image_u8> sam_compute_masks(
         /*.no_alloc   =*/ false,
     };
 
-    // state.ctx = ggml_init(ggml_params);
+    auto& st = *state.state;
+    auto& model = *state.model;
 
-    state.low_res_masks = ggml_new_tensor_3d(state.ctx, GGML_TYPE_F32,
+    st.ctx_masks = ggml_init(ggml_params);
+
+    st.low_res_masks = ggml_new_tensor_3d(st.ctx_masks, GGML_TYPE_F32,
             model.hparams.n_enc_out_chans, model.hparams.n_enc_out_chans, 3);
 
-    state.iou_predictions = ggml_new_tensor_1d(state.ctx, GGML_TYPE_F32, 3);
+    st.iou_predictions = ggml_new_tensor_1d(st.ctx_masks, GGML_TYPE_F32, 3);
 
 
 
-    state.buf_compute_fast.resize(ggml_tensor_overhead()*GGML_DEFAULT_GRAPH_SIZE + ggml_graph_overhead());
-    state.allocr = ggml_gallocr_new(ggml_backend_cpu_buffer_type());
+    st.buf_compute_fast.resize(ggml_tensor_overhead()*GGML_DEFAULT_GRAPH_SIZE + ggml_graph_overhead());
+    st.allocr = ggml_gallocr_new(ggml_backend_cpu_buffer_type());
 
     // TODO: more varied prompts
     fprintf(stderr, "prompt: (%f, %f)\n", pt.x, pt.y);
 
-    struct ggml_cgraph  * gf = sam_build_fast_graph(model, state, img.nx, img.ny, pt);
+    struct ggml_cgraph  * gf = sam_build_fast_graph(model, st, img.nx, img.ny, pt);
     if (!gf) {
         fprintf(stderr, "%s: failed to build fast graph\n", __func__);
         return {};
     }
 
-    ggml_graph_compute_helper(state.work_buffer, gf, n_threads);
+    ggml_graph_compute_helper(st.work_buffer, gf, n_threads);
 
     //print_t_f32("iou_predictions", state.iou_predictions);
     //print_t_f32("low_res_masks", state.low_res_masks);
 
     std::vector<sam_image_u8> masks = sam_postprocess_masks(model.hparams,
-            img.nx, img.ny, state, mask_on_val, mask_off_val);
+            img.nx, img.ny, st, mask_on_val, mask_off_val);
 
-    ggml_gallocr_free(state.allocr);
-    state.allocr = NULL;
+    ggml_gallocr_free(st.allocr);
+    ggml_free(st.ctx_masks);
+
+    st.allocr = NULL;
+    st.ctx_masks = NULL;
+    st.low_res_masks = NULL;
+    st.iou_predictions = NULL;
 
     state.t_compute_masks_ms = ggml_time_ms() - t_start_ms;
     fprintf(stderr, "%s: mask compute time %i ms\n", __func__, state.t_compute_masks_ms);
@@ -1840,8 +2128,13 @@ std::vector<sam_image_u8> sam_compute_masks(
 }
 
 void sam_deinit(
-        const sam_model & model,
         sam_state & state) {
 
-    ggml_free(model.ctx);
+   if (state.state) {
+        if (state.state->ctx_img) {
+            ggml_free(state.state->ctx_img);
+        }
+        state.model.reset();
+        state.state.reset();
+    }
 }

@@ -4,18 +4,6 @@
 #define STB_IMAGE_WRITE_IMPLEMENTATION
 #include "stb_image_write.h"
 
-#include <cassert>
-#include <cmath>
-#include <cstddef>
-#include <cstdio>
-#include <cstring>
-#include <fstream>
-#include <map>
-#include <string>
-#include <vector>
-#include <thread>
-#include <cinttypes>
-
 #if defined(_MSC_VER)
 #pragma warning(disable: 4244 4267) // possible loss of data
 #endif
@@ -38,15 +26,20 @@ bool sam_image_load_from_file(const std::string & fname, sam_image_u8 & img) {
     return true;
 }
 
-bool sam_image_write_to_file(const std::string & fname, std::vector<sam_image_u8> masks) {
+bool sam_image_write_to_file(const std::string & fname, std::vector<sam_image_u8> & masks) {
     for (size_t i = 0; i < masks.size(); i++) {
         if (masks[i].data.empty()) {
             fprintf(stderr, "%s: mask data is empty for mask %zu\n", __func__, i);
             return false;
         }
 
+        if (fname.empty()) {
+            fprintf(stderr, "%s: filename is empty\n", __func__);
+            return false;
+        }
         const std::string fname_i = fname + std::to_string(i) + ".png";
-        if (!stbi_write_png(fname_i.c_str(), masks[i].nx, masks[i].ny, 3, masks[i].data.data(), masks[i].nx * 3)) {
+
+        if (!stbi_write_png(fname_i.c_str(), masks[i].nx, masks[i].ny, 1, masks[i].data.data(), masks[i].nx * 1)) {
             fprintf(stderr, "%s: failed to write '%s'\n", __func__, fname_i.c_str());
             return false;
         } else {
@@ -145,16 +138,17 @@ bool sam_params_parse(int argc, char ** argv, sam_params & params) {
 }
 
 int main(int argc, char ** argv) {
-    const int64_t t_main_start_us = ggml_time_us();
+    // const int64_t t_main_start_us = ggml_time_us();
 
     sam_params params;
     params.model = "ggml-model-f16.bin";
 
-    sam_model model;
-    sam_state state;
-    int64_t t_load_us = 0;
+    // sam_model model;
+    // sam_state state;
+    // int64_t t_load_us = 0;
 
     sam_image_u8 img0;
+    std::vector<sam_image_u8> masks;
 
     if (sam_params_parse(argc, argv, params) == false) {
         return 1;
@@ -173,20 +167,21 @@ int main(int argc, char ** argv) {
     fprintf(stderr, "%s: loaded image '%s' (%d x %d)\n", __func__, params.fname_inp.c_str(), img0.nx, img0.ny);
 
     // load the model
-    if (!sam_model_load(params, model, state)) {
-        fprintf(stderr, "%s: failed to load model from '%s'\n", __func__, params.model.c_str());
+    std::shared_ptr<sam_state> state = sam_load_model(params);
+    if (!state) {
+        fprintf(stderr, "%s: failed to load model\n", __func__);
         return 1;
     }
 
     // encode image
-    if (!sam_compute_embd_img(img0, params.n_threads, model, state)) {
+    if (!sam_compute_embd_img(img0, params.n_threads, *state)) {
         fprintf(stderr, "%s: failed to encode image\n", __func__);
         return 1;
     }
 
     // decode prompt
-    std::vector<sam_image_u8> masks = sam_compute_masks(img0,
-        params.n_threads, params.pt, model, state);
+    masks = sam_compute_masks(img0,
+        params.n_threads, params.pt, *state);
 
     // write masks to file
     if (!sam_image_write_to_file(params.fname_out, masks)) {
@@ -197,11 +192,11 @@ int main(int argc, char ** argv) {
     // report timing
     {
         fprintf(stderr, "\n\n");
-        fprintf(stderr, "%s:     load time = %i ms\n", __func__, state.t_load_ms);
-        fprintf(stderr, "%s:    total time = %i ms\n", __func__, state.t_load_ms + state.t_compute_img_ms + state.t_compute_masks_ms);
+        fprintf(stderr, "%s:     load time = %i ms\n", __func__, state->t_load_ms);
+        fprintf(stderr, "%s:    total time = %i ms\n", __func__, state->t_load_ms + state->t_compute_img_ms + state->t_compute_masks_ms);
     }
 
-    sam_deinit(model, state);
+    sam_deinit(*state);
 
     return 0;
 }
