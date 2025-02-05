@@ -8,6 +8,13 @@ set(GGML_DIR ${CMAKE_CURRENT_SOURCE_DIR}/ggml)
 
 add_subdirectory(${GGML_DIR})
 
+find_package(PkgConfig REQUIRED)
+pkg_check_modules(GTK REQUIRED gtk+-3.0)
+
+include_directories(${GTK_INCLUDE_DIRS})
+link_directories(${GTK_LIBRARY_DIRS})
+add_definitions(${GTK_CFLAGS_OTHER})
+
 add_library(sam STATIC
     sam.cpp
     sam.h
@@ -25,4 +32,15 @@ target_link_libraries(${CLI_TARGET} PRIVATE
     ggml
     sam
     sam_c
+)
+
+set(GUI_SOURCES sam-gui.c sam-gui.h)
+set(GUI_TARGET sam_gui)
+
+add_executable(${GUI_TARGET} ${GUI_SOURCES})
+target_link_libraries(${GUI_TARGET} PRIVATE 
+    ggml
+    sam
+    sam_c
+    ${GTK_LIBRARIES}
 )
