@@ -34,7 +34,7 @@ target_link_libraries(${CLI_TARGET} PRIVATE
     sam_c
 )
 
-set(GUI_SOURCES sam-gui.c sam-gui.h)
+set(GUI_SOURCES sam-gui.c)
 set(GUI_TARGET sam_gui)
 
 add_executable(${GUI_TARGET} ${GUI_SOURCES})
@@ -44,3 +44,9 @@ target_link_libraries(${GUI_TARGET} PRIVATE
     sam_c
     ${GTK_LIBRARIES}
 )
+
+# Copy SAM model file to binary directory
+add_custom_command(TARGET sam_gui POST_BUILD
+    COMMAND ${CMAKE_COMMAND} -E copy
+        ${CMAKE_SOURCE_DIR}/weights/ggml-model-f16.bin
+        $<TARGET_FILE_DIR:sam_gui>/ggml-model-f16.bin)
