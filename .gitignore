@@ -363,3 +363,6 @@ $RECYCLE.BIN/
 
 # Model weights
 weights/
+
+# Gemerated mask images
+images/out/**.png
