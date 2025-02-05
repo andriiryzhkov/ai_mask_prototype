@@ -63,6 +63,18 @@ or
 ./build/bin/sam_cli.exe -t 12 -i ./images/in/example2.jpg -o ./images/out/example2 -p "3860, 2600" -m ./weights/ggml-model-f16.bin 
 ```
 
+GTK3 application
+
+```bash
+cd ./build/bin && ./sam_gui
+```
+
+or
+
+```bash
+cd ./build/bin && ./sam_gui.exe
+```
+
 ## License
 
 GPL3
