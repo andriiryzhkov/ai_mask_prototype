@@ -12,7 +12,7 @@ Clone repository
 
 ```bash
 git clone git@github.com:andriiryzhkov/ai_mask_prototype.git
-cd ggml
+cd ai_mask_prototype
 git submodule update --init --recursive
 ```
 
@@ -37,6 +37,11 @@ poetry run python scripts/convert-pth-to-ggml.py weights/sam_vit_b_01ec64.pth ch
 Build
 
 ```bash
+./build.sh
+```
+or
+
+```bash
 mkdir build && cd build
 cmake -G Ninja ..
 cmake --build . --config Release -j 8
@@ -47,8 +52,15 @@ cmake --build . --config Release -j 8
 Run command line inference
 
 ```bash
-./bin/sam_cli -t 12 -i ../example1.jpg -p "414, 162" -m ../weights/ggml-model-f16.bin 
-./bin/sam_cli -t 12 -i ../example2.jpg -p "3860, 2600" -m ../weights/ggml-model-f16.bin 
+./build/bin/sam_cli -t 12 -i ./example1.jpg -p "414, 162" -m ./weights/ggml-model-f16.bin 
+./build/bin/sam_cli -t 12 -i ./example2.jpg -p "3860, 2600" -m ./weights/ggml-model-f16.bin 
+```
+
+or 
+
+```bash
+./build/bin/sam_cli.exe -t 12 -i ./example1.jpg -p "414, 162" -m ./weights/ggml-model-f16.bin 
+./build/bin/sam_cli.exe -t 12 -i ./example2.jpg -p "3860, 2600" -m ./weights/ggml-model-f16.bin 
 ```
 
 ## License
