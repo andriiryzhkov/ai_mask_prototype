@@ -34,6 +34,7 @@ typedef struct {
     GtkWidget* window;
     GtkWidget* drawing_area;
     GtkWidget* load_button;
+    GtkWidget* clear_button;
     GtkWidget* save_button;
     GtkWidget* spinner;      // Spinner widget for loading indication
     gboolean computing;      // Flag to track if we're computing embeddings
@@ -97,6 +98,27 @@ static void app_context_clear_image(app_context* ctx) {
         g_object_unref(ctx->mask_overlay);
         ctx->mask_overlay = NULL;
     }
+}
+
+static void clear_prompts(app_context* ctx) {
+    // Clear points
+    g_array_set_size(ctx->points, 0);
+    
+    // Clear mask
+    if (ctx->mask) {
+        free(ctx->mask->data);
+        free(ctx->mask);
+        ctx->mask = NULL;
+    }
+    
+    // Clear mask overlay
+    if (ctx->mask_overlay) {
+        g_object_unref(ctx->mask_overlay);
+        ctx->mask_overlay = NULL;
+    }
+    
+    // Redraw
+    gtk_widget_queue_draw(ctx->drawing_area);
 }
 
 static gboolean load_sam_model(app_context* ctx) {
@@ -255,6 +277,10 @@ static void on_load_button_clicked(GtkButton* button, app_context* ctx) {
 
     // Compute image embeddings after the image is shown
     compute_image_embedding(ctx);
+}
+
+static void on_clear_button_clicked(GtkButton* button, app_context* ctx) {
+    clear_prompts(ctx);
 }
 
 static void on_save_button_clicked(GtkButton* button, app_context* ctx) {
@@ -434,11 +460,14 @@ int main(int argc, char* argv[]) {
     
     // Create buttons
     ctx.load_button = gtk_button_new_with_label("Load Image");
+    ctx.clear_button = gtk_button_new_with_label("Clear Prompts");
     ctx.save_button = gtk_button_new_with_label("Save Mask");
     gtk_box_pack_start(GTK_BOX(button_box), ctx.load_button, FALSE, FALSE, 5);
+    gtk_box_pack_start(GTK_BOX(button_box), ctx.clear_button, FALSE, FALSE, 5);
     gtk_box_pack_start(GTK_BOX(button_box), ctx.save_button, FALSE, FALSE, 5);
     
     g_signal_connect(ctx.load_button, "clicked", G_CALLBACK(on_load_button_clicked), &ctx);
+    g_signal_connect(ctx.clear_button, "clicked", G_CALLBACK(on_clear_button_clicked), &ctx);
     g_signal_connect(ctx.save_button, "clicked", G_CALLBACK(on_save_button_clicked), &ctx);
 
     // Create overlay for drawing area and spinner
