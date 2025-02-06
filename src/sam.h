@@ -28,7 +28,7 @@ struct sam_params {
     int32_t seed      = -1; // RNG seed
     int32_t n_threads = std::min(4, (int32_t) std::thread::hardware_concurrency());
 
-    std::string model     = "ggml-model-f16.bin"; // model path
+    std::string model     = "sam_vit_b-ggml-model-f16.bin"; // model path
     std::string fname_inp = "img.jpg";
     std::string fname_out = "img";
     float   mask_threshold            = 0.f;

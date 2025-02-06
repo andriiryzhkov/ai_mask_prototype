@@ -55,7 +55,7 @@ static void app_context_init(app_context* ctx) {
     ctx->mask_overlay = NULL;
     // Initialize SAM parameters
     sam_params_init(&ctx->sam_params);
-    ctx->sam_params.model = "ggml-model-f16.bin";
+    ctx->sam_params.model = "sam_vit_b-ggml-model-f16.bin";
 }
 
 static void app_context_free(app_context* ctx) {

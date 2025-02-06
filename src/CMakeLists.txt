@@ -48,5 +48,5 @@ target_link_libraries(${GUI_TARGET} PRIVATE
 # Copy SAM model file to binary directory
 add_custom_command(TARGET sam_gui POST_BUILD
     COMMAND ${CMAKE_COMMAND} -E copy
-        ${CMAKE_SOURCE_DIR}/weights/ggml-model-f16.bin
-        $<TARGET_FILE_DIR:sam_gui>/ggml-model-f16.bin)
+        ${CMAKE_SOURCE_DIR}/weights/sam_vit_b-ggml-model-f16.bin
+        $<TARGET_FILE_DIR:sam_gui>/sam_vit_b-ggml-model-f16.bin)

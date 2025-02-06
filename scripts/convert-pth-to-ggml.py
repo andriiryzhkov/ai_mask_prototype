@@ -15,7 +15,7 @@ if len(sys.argv) < 3:
 # output in the same directory as the model
 fname_model = sys.argv[1]
 dir_out     = sys.argv[2]
-fname_out   = dir_out + "/ggml-model.bin"
+fname_out   = dir_out + "/sam_vit_b-ggml-model-f16.bin"
 
 # possible data types
 #   ftype == 0 -> float32
