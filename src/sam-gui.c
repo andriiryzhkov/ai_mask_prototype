@@ -421,7 +421,7 @@ int main(int argc, char* argv[]) {
     // Create main window
     ctx.window = gtk_window_new(GTK_WINDOW_TOPLEVEL);
     gtk_window_set_title(GTK_WINDOW(ctx.window), "AI Object Mask Demo");
-    gtk_window_set_default_size(GTK_WINDOW(ctx.window), 800, 600);
+    gtk_window_set_default_size(GTK_WINDOW(ctx.window), 1200, 800);
     g_signal_connect(ctx.window, "destroy", G_CALLBACK(gtk_main_quit), NULL);
     
     // Create vertical box for layout
