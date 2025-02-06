@@ -34,7 +34,7 @@ target_link_libraries(${CLI_TARGET} PRIVATE
     sam_c
 )
 
-set(GUI_SOURCES sam-gui.c)
+set(GUI_SOURCES gui.c)
 set(GUI_TARGET sam_gui)
 
 add_executable(${GUI_TARGET} ${GUI_SOURCES})

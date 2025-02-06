@@ -14,6 +14,7 @@ typedef struct sam_context_t sam_context_t;
 typedef struct sam_point_t {
     float x;
     float y;
+    int label;
 } sam_point_t;
 
 typedef struct sam_image_t {
@@ -49,7 +50,7 @@ bool sam_compute_image_embeddings(sam_context_t* ctx, sam_image_t* img, int n_th
 // Compute masks for given point
 // Returns array of masks and writes number of masks to n_masks
 sam_image_t* sam_compute_masks(sam_context_t* ctx, const sam_image_t* img, int n_threads,
-                              sam_point_t pt, int* n_masks,
+                              const sam_point_t* points, int n_points, int* n_masks,
                               int mask_on_val, int mask_off_val);
 
 // Free a mask array returned by sam_compute_masks

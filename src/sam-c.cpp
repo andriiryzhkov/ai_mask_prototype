@@ -64,23 +64,27 @@ bool sam_compute_image_embeddings(sam_context_t* ctx, sam_image_t* img, int n_th
 }
 
 sam_image_t* sam_compute_masks(sam_context_t* ctx, const sam_image_t* img, int n_threads,
-                              sam_point_t pt, int* n_masks,
+                              const sam_point_t* points, int n_points, int* n_masks,
                               int mask_on_val, int mask_off_val) {
-    if (!ctx || !ctx->state || !img || !img->data || !n_masks) return nullptr;
+   if (!ctx || !ctx->state || !img || !img->data || !points || n_points <= 0 || !n_masks) return nullptr;
 
     sam_image_u8 cpp_img;
     cpp_img.nx = img->nx;
     cpp_img.ny = img->ny;
     cpp_img.data.assign(img->data, img->data + (img->nx * img->ny * 3));
 
-    sam_point cpp_pt = {pt.x, pt.y};
+    std::vector<sam_point> cpp_points;
+    cpp_points.reserve(n_points);
+    for (int i = 0; i < n_points; i++) {
+        cpp_points.push_back({points[i].x, points[i].y, points[i].label});
+    }
 
-    auto masks = sam_compute_masks(cpp_img, n_threads, cpp_pt, *ctx->state, mask_on_val, mask_off_val);
+    auto masks = sam_compute_masks(cpp_img, n_threads, cpp_points, *ctx->state, mask_on_val, mask_off_val);
     if (masks.empty()) {
         *n_masks = 0;
         return nullptr;
     }
-
+    
     *n_masks = masks.size();
     auto* result = new sam_image_t[*n_masks];
     

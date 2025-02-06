@@ -14,6 +14,7 @@
 struct sam_point {
     float x;
     float y;
+    int label;
 };
 
 // RGB uint8 image
@@ -37,7 +38,7 @@ struct sam_params {
     float   stability_score_offset    = 1.0f;
     float   eps                       = 1e-6f;
     float   eps_decoder_transformer   = 1e-5f;
-    sam_point pt = { 414.375f, 162.796875f, };
+    sam_point pt = { 414.375f, 162.796875f, 1 };
 }; 
 
 // struct sam_state;
@@ -66,7 +67,7 @@ bool sam_compute_embd_img(
 std::vector<sam_image_u8> sam_compute_masks(
     sam_image_u8 & img,
     int n_threads,
-    sam_point pt,
+    std::vector<sam_point> points,
     sam_state & state,
     int mask_on_val = 255,
     int mask_off_val = 0);

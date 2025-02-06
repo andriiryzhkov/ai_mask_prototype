@@ -92,8 +92,8 @@ void sam_print_usage(const char* program_name, const sam_params_t* params) {
     fprintf(stderr, "                        epsilon decoder transformer (default: %f)\n", params->eps_decoder_transformer);
     fprintf(stderr, "SAM prompt:\n");
     fprintf(stderr, "  -p TUPLE, --point-prompt\n");
-    fprintf(stderr, "                        point to be used as prompt for SAM (default: %f,%f). Must be in a format FLOAT,FLOAT \n", 
-            params->pt.x, params->pt.y);
+    fprintf(stderr, "                        point to be used as prompt for SAM (default: %f, %f, %d). Must be in a format FLOAT, FLOAT, INT \n", 
+        params->pt.x, params->pt.y, params->pt.label);
     fprintf(stderr, "\n");
 }
 
@@ -122,7 +122,7 @@ bool sam_params_parse(int argc, char** argv, sam_params_t* params) {
         } else if (strcmp(arg, "-e") == 0 || strcmp(arg, "--epsilon") == 0) {
             params->eps = (float)atof(argv[++i]);
         } else if (strcmp(arg, "-ed") == 0 || strcmp(arg, "--epsilon-decoder-transformer") == 0) {
-            params->eps_decoder_transformer = (float)atof(argv[++i]);
+                params->eps_decoder_transformer = (float)atof(argv[++i]);
         } else if (strcmp(arg, "-p") == 0 || strcmp(arg, "--point-prompt") == 0) {
             char* point = argv[++i];
             char* coord = strtok(point, ",");
@@ -131,12 +131,20 @@ bool sam_params_parse(int argc, char** argv, sam_params_t* params) {
                 return false;
             }
             params->pt.x = (float)atof(coord);
+            
             coord = strtok(NULL, ",");
             if (!coord) {
                 fprintf(stderr, "Error while parsing prompt!\n");
                 return false;
             }
             params->pt.y = (float)atof(coord);
+            
+            coord = strtok(NULL, ",");
+            if (!coord) {
+                fprintf(stderr, "Error while parsing prompt!\n");
+                return false;
+            }
+            params->pt.label = atoi(coord);
         } else if (strcmp(arg, "-h") == 0 || strcmp(arg, "--help") == 0) {
             sam_print_usage(argv[0], params);
             exit(0);
@@ -192,7 +200,7 @@ int main(int argc, char** argv) {
     }
 
     // Decode prompt
-    masks = sam_compute_masks(ctx, &img, params.n_threads, params.pt, &n_masks, 255, 0);
+    masks = sam_compute_masks(ctx, &img, params.n_threads, &params.pt, 1, &n_masks, 255, 0);
     if (!masks || n_masks == 0) {
         fprintf(stderr, "%s: failed to compute masks\n", __func__);
         free(img.data);

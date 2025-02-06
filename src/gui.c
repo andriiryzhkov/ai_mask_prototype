@@ -164,10 +164,10 @@ static gboolean compute_mask(app_context* ctx, click_point* pt) {
 
     int n_masks = 0;
     sam_image_t* masks = NULL;
-    sam_point_t sam_pt = { pt->x, pt->y };
+    sam_point_t sam_pt = { pt->x, pt->y, pt->label };
     
     masks = sam_compute_masks(ctx->sam_ctx, ctx->current_image, 
-                            ctx->sam_params.n_threads, sam_pt, &n_masks, 255, 0);
+                            ctx->sam_params.n_threads, &sam_pt, 1, &n_masks, 255, 0);
 
     // Hide spinner
     ctx->computing = FALSE;
@@ -425,6 +425,7 @@ static gboolean on_button_press(GtkWidget* widget, GdkEventButton* event, app_co
             .y = image_y,
             .label = (event->button == 1) ? 1 : 0  // Left click = 1, Right click = 0
         };
+        fprintf(stderr, "%s: point (%f, %f, %i)\n", __func__, pt.x, pt.y, pt.label);
         
         g_array_append_val(ctx->points, pt);
 

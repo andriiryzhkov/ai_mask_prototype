@@ -52,15 +52,15 @@ cmake --build . --config Release -j 8
 Run command line inference
 
 ```bash
-./build/bin/sam_cli -t 12 -i ./images/in/example1.jpg -o ./images/out/example1 -p "414, 162" -m ./weights/sam_vit_b-ggml-model-f16.bin 
-./build/bin/sam_cli -t 12 -i ./images/in/example2.jpg -o ./images/out/example2 -p "3860, 2600" -m ./weights/sam_vit_b-ggml-model-f16.bin 
+./build/bin/sam_cli -t 12 -i ./images/in/example1.jpg -o ./images/out/example1 -p "2070, 1170, 1" -m ./weights/sam_vit_b-ggml-model-f16.bin 
+./build/bin/sam_cli -t 12 -i ./images/in/example2.jpg -o ./images/out/example2 -p "650, 700, 1" -m ./weights/sam_vit_b-ggml-model-f16.bin 
 ```
 
 or 
 
 ```bash
-./build/bin/sam_cli.exe -t 12 -i ./images/in/example1.jpg -o ./images/out/example1 -p "414, 162" -m ./weights/sam_vit_b-ggml-model-f16.bin 
-./build/bin/sam_cli.exe -t 12 -i ./images/in/example2.jpg -o ./images/out/example2 -p "3860, 2600" -m ./weights/sam_vit_b-ggml-model-f16.bin 
+./build/bin/sam_cli.exe -t 12 -i ./images/in/example1.jpg -o ./images/out/example1 -p "2070, 1170, 1" -m ./weights/sam_vit_b-ggml-model-f16.bin 
+./build/bin/sam_cli.exe -t 12 -i ./images/in/example2.jpg -o ./images/out/example2 -p "650, 700, 1" -m ./weights/sam_vit_b-ggml-model-f16.bin 
 ```
 
 GTK3 application

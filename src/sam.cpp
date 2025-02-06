@@ -1360,6 +1360,7 @@ prompt_encoder_result sam_encode_prompt(
     const auto & enc = model.enc_prompt;
 
     struct ggml_tensor * inp = ggml_new_tensor_2d(ctx0, GGML_TYPE_F32, 2, 2);
+    // struct ggml_tensor * inp = ggml_new_tensor_2d(ctx0, GGML_TYPE_F32, 2, points.size()); // 2 for x, y; points.size() for number of points
     ggml_set_name(inp, "prompt_input");
     ggml_set_input(inp);
 
@@ -1893,13 +1894,15 @@ struct ggml_cgraph  * sam_build_fast_graph(
              sam_ggml_state & state,
                         int   nx,
                         int   ny,
-                  sam_point   point) {
+     std::vector<sam_point>   points) {
 
     struct ggml_init_params ggml_params = {
         /*.mem_size   =*/ state.buf_compute_fast.size(),
         /*.mem_buffer =*/ state.buf_compute_fast.data(),
         /*.no_alloc   =*/ true, // skip allocating as we use ggml_alloc to allocate exact memory requirements
     };
+    
+    sam_point point = points[0]; // TODO: remove to support multiple points
 
     struct ggml_context * ctx0   = ggml_init(ggml_params);
     struct ggml_cgraph  * gf     = ggml_new_graph(ctx0);
@@ -2059,12 +2062,12 @@ bool sam_compute_embd_img(
 }
 
 std::vector<sam_image_u8> sam_compute_masks(
-        sam_image_u8 & img,
-                 int   n_threads,
-           sam_point   pt,
-           sam_state & state,
-                 int   mask_on_val,
-                 int   mask_off_val) {
+              sam_image_u8 & img,
+                       int   n_threads,
+    std::vector<sam_point>   points,
+                 sam_state & state,
+                       int   mask_on_val,
+                       int   mask_off_val) {
 
     if (!state.model || !state.state) {
         fprintf(stderr, "%s: model or state is not initialized\n", __func__);
@@ -2097,9 +2100,11 @@ std::vector<sam_image_u8> sam_compute_masks(
     st.allocr = ggml_gallocr_new(ggml_backend_cpu_buffer_type());
 
     // TODO: more varied prompts
-    fprintf(stderr, "prompt: (%f, %f)\n", pt.x, pt.y);
-
-    struct ggml_cgraph  * gf = sam_build_fast_graph(model, st, img.nx, img.ny, pt);
+    fprintf(stderr, "prompts:\n");
+    for (const auto& pt: points) {
+        fprintf(stderr, "        (%f, %f, %d)\n", pt.x, pt.y, pt.label);
+    }
+    struct ggml_cgraph  * gf = sam_build_fast_graph(model, st, img.nx, img.ny, points);
     if (!gf) {
         fprintf(stderr, "%s: failed to build fast graph\n", __func__);
         return {};
