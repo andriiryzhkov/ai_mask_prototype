@@ -69,6 +69,7 @@
         "algorithm": "cpp",
         "cassert": "cpp",
         "stdint.h": "c",
-        "ggml.h": "c"
+        "ggml.h": "c",
+        "sam-gui.h": "c"
     }
 }

@@ -63,6 +63,23 @@ or
 ./build/bin/sam_cli.exe -t 12 -i ./images/in/example2.jpg -o ./images/out/example2 -p "3860, 2600" -m ./weights/ggml-model-f16.bin 
 ```
 
+GTK3 application
+
+```bash
+cd ./build/bin && ./sam_gui
+```
+
+or
+
+```bash
+cd ./build/bin && ./sam_gui.exe
+```
+
+## Sample images
+
+1. Photo by [Aaron Doucett](https://unsplash.com/@adoucett?utm_content=creditCopyText&utm_medium=referral&utm_source=unsplash) on [Unsplash](https://unsplash.com/photos/black-and-brown-turtle-on-brown-wood-iz2C8o4zyP4?utm_content=creditCopyText&utm_medium=referral&utm_source=unsplash)
+2. Photo by [Anoir Chafik](https://unsplash.com/@anoirchafik?utm_content=creditCopyText&utm_medium=referral&utm_source=unsplash) on [Unsplash](https://unsplash.com/photos/selective-focus-photography-of-three-brown-puppies-2_3c4dIFYFU?utm_content=creditCopyText&utm_medium=referral&utm_source=unsplash)
+
 ## License
 
 GPL3
