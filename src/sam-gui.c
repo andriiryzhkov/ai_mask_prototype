@@ -35,6 +35,8 @@ typedef struct {
     GtkWidget* drawing_area;
     GtkWidget* load_button;
     GtkWidget* save_button;
+    GtkWidget* spinner;      // Spinner widget for loading indication
+    gboolean computing;      // Flag to track if we're computing embeddings
 } app_context;
 
 static void app_context_init(app_context* ctx) {
@@ -47,7 +49,7 @@ static void app_context_init(app_context* ctx) {
     ctx->sam_ctx = NULL;
     ctx->current_image = NULL;
     ctx->mask = NULL;
-    
+    ctx->computing = FALSE;   
     // Initialize SAM parameters
     sam_params_init(&ctx->sam_params);
     ctx->sam_params.model = "ggml-model-f16.bin";
@@ -100,7 +102,26 @@ static gboolean load_sam_model(app_context* ctx) {
 static gboolean compute_image_embedding(app_context* ctx) {
     if (!ctx->current_image || !ctx->sam_ctx) return FALSE;
     
-    return sam_compute_image_embeddings(ctx->sam_ctx, ctx->current_image, ctx->sam_params.n_threads);
+    // Disable interaction and show spinner
+    ctx->computing = TRUE;
+    gtk_widget_set_sensitive(ctx->window, FALSE);
+    gtk_widget_show(ctx->spinner);
+    gtk_spinner_start(GTK_SPINNER(ctx->spinner));
+    
+    // Process events to show spinner
+    while (gtk_events_pending()) gtk_main_iteration();
+    
+    // Compute embeddings
+    gboolean result = sam_compute_image_embeddings(ctx->sam_ctx, ctx->current_image, 
+                                                 ctx->sam_params.n_threads);
+    
+    // Re-enable interaction and hide spinner
+    ctx->computing = FALSE;
+    gtk_widget_set_sensitive(ctx->window, TRUE);
+    gtk_spinner_stop(GTK_SPINNER(ctx->spinner));
+    gtk_widget_hide(ctx->spinner);
+    
+    return result;
 }
 
 static gboolean compute_and_save_mask(app_context* ctx, const char* filename) {
@@ -176,8 +197,6 @@ static void on_load_button_clicked(GtkButton* button, app_context* ctx) {
                 }
             }
             
-            // Compute embeddings
-            compute_image_embedding(ctx);
             gtk_widget_queue_draw(ctx->drawing_area);
         }
         
@@ -185,9 +204,14 @@ static void on_load_button_clicked(GtkButton* button, app_context* ctx) {
     }
     
     gtk_widget_destroy(dialog);
+
+    // Compute image embeddings after the image is shown
+    compute_image_embedding(ctx);
 }
 
 static void on_save_button_clicked(GtkButton* button, app_context* ctx) {
+    if (!ctx->image_pixbuf || ctx->computing) return;
+
     if (!ctx->current_image || ctx->points->len == 0) return;
 
     GtkWidget* dialog = gtk_file_chooser_dialog_new("Save Mask",
@@ -322,15 +346,27 @@ int main(int argc, char* argv[]) {
     g_signal_connect(ctx.load_button, "clicked", G_CALLBACK(on_load_button_clicked), &ctx);
     g_signal_connect(ctx.save_button, "clicked", G_CALLBACK(on_save_button_clicked), &ctx);
 
+    // Create overlay for drawing area and spinner
+    GtkWidget* overlay = gtk_overlay_new();
+    gtk_box_pack_start(GTK_BOX(vbox), overlay, TRUE, TRUE, 0);
+
     // Create drawing area
     ctx.drawing_area = gtk_drawing_area_new();
     gtk_widget_set_size_request(ctx.drawing_area, 400, 300);
-    gtk_box_pack_start(GTK_BOX(vbox), ctx.drawing_area, TRUE, TRUE, 0);
+    // gtk_box_pack_start(GTK_BOX(vbox), ctx.drawing_area, TRUE, TRUE, 0);
+    gtk_container_add(GTK_CONTAINER(overlay), ctx.drawing_area);
     
     g_signal_connect(ctx.drawing_area, "draw", G_CALLBACK(on_draw), &ctx);
     g_signal_connect(ctx.drawing_area, "button-press-event", G_CALLBACK(on_button_press), &ctx);
     gtk_widget_set_events(ctx.drawing_area, gtk_widget_get_events(ctx.drawing_area) | 
                          GDK_BUTTON_PRESS_MASK);
+
+    // Create and position spinner
+    ctx.spinner = gtk_spinner_new();
+    gtk_widget_set_halign(ctx.spinner, GTK_ALIGN_CENTER);
+    gtk_widget_set_valign(ctx.spinner, GTK_ALIGN_CENTER);
+    gtk_overlay_add_overlay(GTK_OVERLAY(overlay), ctx.spinner);
+    gtk_widget_hide(ctx.spinner);  // Initially hidden
 
     // Load SAM model
     if (!load_sam_model(&ctx)) {
