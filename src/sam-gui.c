@@ -37,6 +37,7 @@ typedef struct {
     GtkWidget* save_button;
     GtkWidget* spinner;      // Spinner widget for loading indication
     gboolean computing;      // Flag to track if we're computing embeddings
+    GdkPixbuf* mask_overlay;  // For displaying the computed mask
 } app_context;
 
 static void app_context_init(app_context* ctx) {
@@ -49,7 +50,8 @@ static void app_context_init(app_context* ctx) {
     ctx->sam_ctx = NULL;
     ctx->current_image = NULL;
     ctx->mask = NULL;
-    ctx->computing = FALSE;   
+    ctx->computing = FALSE;
+    ctx->mask_overlay = NULL;
     // Initialize SAM parameters
     sam_params_init(&ctx->sam_params);
     ctx->sam_params.model = "ggml-model-f16.bin";
@@ -68,6 +70,7 @@ static void app_context_free(app_context* ctx) {
         free(ctx->mask);
     }
     if (ctx->sam_ctx) sam_free(ctx->sam_ctx);
+    if (ctx->mask_overlay) g_object_unref(ctx->mask_overlay);
 }
 
 static void app_context_clear_points(app_context* ctx) {
@@ -90,6 +93,10 @@ static void app_context_clear_image(app_context* ctx) {
     ctx->image_width = 0;
     ctx->image_height = 0;
     app_context_clear_points(ctx);
+    if (ctx->mask_overlay) {
+        g_object_unref(ctx->mask_overlay);
+        ctx->mask_overlay = NULL;
+    }
 }
 
 static gboolean load_sam_model(app_context* ctx) {
@@ -124,30 +131,71 @@ static gboolean compute_image_embedding(app_context* ctx) {
     return result;
 }
 
-static gboolean compute_and_save_mask(app_context* ctx, const char* filename) {
-    if (!ctx->current_image || !ctx->sam_ctx || ctx->points->len == 0) return FALSE;
+static gboolean compute_mask(app_context* ctx, click_point* pt) {
+    if (!ctx->current_image || !ctx->sam_ctx) return FALSE;
+
+    // Show spinner while computing
+    ctx->computing = TRUE;
+    gtk_widget_show(ctx->spinner);
+    gtk_spinner_start(GTK_SPINNER(ctx->spinner));
+    while (gtk_events_pending()) gtk_main_iteration();
 
     int n_masks = 0;
     sam_image_t* masks = NULL;
+    sam_point_t sam_pt = { pt->x, pt->y };
     
-    // Convert points to SAM format and compute masks
-    for (guint i = 0; i < ctx->points->len; i++) {
-        click_point* pt = &g_array_index(ctx->points, click_point, i);
-        sam_point_t sam_pt = { pt->x, pt->y };
-        
-        masks = sam_compute_masks(ctx->sam_ctx, ctx->current_image, 
-                                ctx->sam_params.n_threads, sam_pt, &n_masks, 255, 0);
-        if (masks && n_masks > 0) break;
-    }
-    
+    masks = sam_compute_masks(ctx->sam_ctx, ctx->current_image, 
+                            ctx->sam_params.n_threads, sam_pt, &n_masks, 255, 0);
+
+    // Hide spinner
+    ctx->computing = FALSE;
+    gtk_spinner_stop(GTK_SPINNER(ctx->spinner));
+    gtk_widget_hide(ctx->spinner);
+
     if (!masks || n_masks == 0) return FALSE;
 
-    // Save the first mask
-    gboolean success = (stbi_write_png(filename, masks[0].nx, masks[0].ny, 
-                                     1, masks[0].data, masks[0].nx) != 0);
+    // Store the mask in ctx->mask
+    if (ctx->mask) {
+        free(ctx->mask->data);
+        free(ctx->mask);
+    }
+    ctx->mask = malloc(sizeof(sam_image_t));
+    ctx->mask->nx = masks[0].nx;
+    ctx->mask->ny = masks[0].ny;
+    ctx->mask->data = malloc(masks[0].nx * masks[0].ny);
+    memcpy(ctx->mask->data, masks[0].data, masks[0].nx * masks[0].ny);
+
+    // Clear previous mask overlay
+    if (ctx->mask_overlay) {
+        g_object_unref(ctx->mask_overlay);
+        ctx->mask_overlay = NULL;
+    }
+
+    // Create new mask overlay
+    ctx->mask_overlay = gdk_pixbuf_new(GDK_COLORSPACE_RGB, TRUE, 8, 
+                                      ctx->image_width, ctx->image_height);
     
+    // Fill mask overlay with transparent black
+    guchar* pixels = gdk_pixbuf_get_pixels(ctx->mask_overlay);
+    int stride = gdk_pixbuf_get_rowstride(ctx->mask_overlay);
+    
+    for (int y = 0; y < ctx->image_height; y++) {
+        for (int x = 0; x < ctx->image_width; x++) {
+            guchar* p = pixels + y * stride + x * 4;
+            if (masks[0].data[y * ctx->image_width + x] > 0) {
+                p[0] = 0;    // R
+                p[1] = 0;    // G
+                p[2] = 0;    // B
+                p[3] = 128;  // A (50% opacity)
+            } else {
+                p[0] = p[1] = p[2] = p[3] = 0;  // Fully transparent
+            }
+        }
+    }
+
     sam_free_masks(masks, n_masks);
-    return success;
+    gtk_widget_queue_draw(ctx->drawing_area);
+    return TRUE;
 }
 
 static void on_load_button_clicked(GtkButton* button, app_context* ctx) {
@@ -212,7 +260,16 @@ static void on_load_button_clicked(GtkButton* button, app_context* ctx) {
 static void on_save_button_clicked(GtkButton* button, app_context* ctx) {
     if (!ctx->image_pixbuf || ctx->computing) return;
 
-    if (!ctx->current_image || ctx->points->len == 0) return;
+    if (!ctx->mask) {
+        GtkWidget* dialog = gtk_message_dialog_new(GTK_WINDOW(ctx->window),
+                                                 GTK_DIALOG_DESTROY_WITH_PARENT,
+                                                 GTK_MESSAGE_ERROR,
+                                                 GTK_BUTTONS_CLOSE,
+                                                 "No mask available to save!");
+        gtk_dialog_run(GTK_DIALOG(dialog));
+        gtk_widget_destroy(dialog);
+        return;
+    }
 
     GtkWidget* dialog = gtk_file_chooser_dialog_new("Save Mask",
                                                    GTK_WINDOW(ctx->window),
@@ -220,12 +277,40 @@ static void on_save_button_clicked(GtkButton* button, app_context* ctx) {
                                                    "_Cancel", GTK_RESPONSE_CANCEL,
                                                    "_Save", GTK_RESPONSE_ACCEPT,
                                                    NULL);
+
+    // Add PNG file filter
+    GtkFileFilter* filter = gtk_file_filter_new();
+    gtk_file_filter_add_pattern(filter, "*.png");
+    gtk_file_filter_set_name(filter, "PNG images");
+    gtk_file_chooser_add_filter(GTK_FILE_CHOOSER(dialog), filter);
+    gtk_file_chooser_set_filter(GTK_FILE_CHOOSER(dialog), filter);
     
     gtk_file_chooser_set_do_overwrite_confirmation(GTK_FILE_CHOOSER(dialog), TRUE);
     
+    // Set default filename if we have original image name
+    if (ctx->image_filename) {
+        char* default_name = g_strconcat("mask_", g_path_get_basename(ctx->image_filename), ".png", NULL);
+        gtk_file_chooser_set_current_name(GTK_FILE_CHOOSER(dialog), default_name);
+        g_free(default_name);
+    }
+    
     if (gtk_dialog_run(GTK_DIALOG(dialog)) == GTK_RESPONSE_ACCEPT) {
         char* filename = gtk_file_chooser_get_filename(GTK_FILE_CHOOSER(dialog));
-        compute_and_save_mask(ctx, filename);
+        
+        // Save the mask directly from ctx->mask
+        gboolean success = (stbi_write_png(filename, ctx->mask->nx, ctx->mask->ny, 
+                                         1, ctx->mask->data, ctx->mask->nx) != 0);
+        
+        if (!success) {
+            GtkWidget* error_dialog = gtk_message_dialog_new(GTK_WINDOW(ctx->window),
+                                                           GTK_DIALOG_DESTROY_WITH_PARENT,
+                                                           GTK_MESSAGE_ERROR,
+                                                           GTK_BUTTONS_CLOSE,
+                                                           "Failed to save mask!");
+            gtk_dialog_run(GTK_DIALOG(error_dialog));
+            gtk_widget_destroy(error_dialog);
+        }
+        
         g_free(filename);
     }
     
@@ -259,7 +344,13 @@ static gboolean on_draw(GtkWidget* widget, cairo_t* cr, app_context* ctx) {
     cairo_scale(cr, ctx->image_scale, ctx->image_scale);
     gdk_cairo_set_source_pixbuf(cr, ctx->image_pixbuf, 0, 0);
     cairo_paint(cr);
-    
+
+    // Draw mask overlay if available
+    if (ctx->mask_overlay) {
+        gdk_cairo_set_source_pixbuf(cr, ctx->mask_overlay, 0, 0);
+        cairo_paint(cr);
+    }
+
     // Draw points
     cairo_scale(cr, 1.0/ctx->image_scale, 1.0/ctx->image_scale);
     for (guint i = 0; i < ctx->points->len; i++) {
@@ -310,6 +401,10 @@ static gboolean on_button_press(GtkWidget* widget, GdkEventButton* event, app_co
         };
         
         g_array_append_val(ctx->points, pt);
+
+        // Compute new mask using this point
+        compute_mask(ctx, &pt);
+
         gtk_widget_queue_draw(widget);
     }
     
