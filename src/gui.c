@@ -358,9 +358,9 @@ static gboolean compute_mask(app_context* ctx, GArray* points) {
         for (int x = 0; x < ctx->image_width; x++) {
             guchar* p = pixels + y * stride + x * 4;
             if (masks[0].data[y * ctx->image_width + x] > 0) {
-                p[0] = 0;    // R
-                p[1] = 0;    // G
-                p[2] = 0;    // B
+                p[0] = 135;    // R
+                p[1] = 206;    // G
+                p[2] = 235;    // B
                 p[3] = 128;  // A (50% opacity)
             } else {
                 p[0] = p[1] = p[2] = p[3] = 0;  // Fully transparent
