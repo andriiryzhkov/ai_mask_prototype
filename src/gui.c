@@ -1,6 +1,11 @@
 #include "sam-c.h"
 
 #include <string.h>
+#ifdef _WIN32
+#include <windows.h>
+#else
+#include <unistd.h>
+#endif
 #include <gtk/gtk.h>
 #define STB_IMAGE_IMPLEMENTATION
 #include "stb_image.h"
@@ -41,6 +46,128 @@ typedef struct {
     GdkPixbuf* mask_overlay;  // For displaying the computed mask
 } app_context;
 
+static char* get_current_path() {
+    static char exe_path[1024];  // Static buffer to store the path
+    
+#ifdef _WIN32
+    // Windows version
+    DWORD len = GetModuleFileName(NULL, exe_path, sizeof(exe_path)-1);
+    if (len == 0 || len == sizeof(exe_path)-1) {
+        fprintf(stderr, "Failed to get executable path\n");
+        return NULL;
+    }
+    exe_path[len] = '\0';
+#else
+    // Linux/Unix version
+    ssize_t len = readlink("/proc/self/exe", exe_path, sizeof(exe_path)-1);
+    if (len == -1) {
+        fprintf(stderr, "Failed to get executable path\n");
+        return NULL;
+    }
+    exe_path[len] = '\0';
+#endif
+
+    // Get directory by removing executable name
+    char* last_slash = NULL;
+#ifdef _WIN32
+    // Windows: look for both forward and backward slashes
+    char* last_forward = strrchr(exe_path, '/');
+    char* last_backward = strrchr(exe_path, '\\');
+    if (last_forward && last_backward) {
+        last_slash = (last_forward > last_backward) ? last_forward : last_backward;
+    } else {
+        last_slash = last_forward ? last_forward : last_backward;
+    }
+#else
+    last_slash = strrchr(exe_path, '/');
+#endif
+
+    if (last_slash != NULL) {
+        *last_slash = '\0';
+    }
+    
+    return exe_path;
+}
+
+static void create_default_config(const char* config_path) {
+    FILE* f = fopen(config_path, "w");
+    if (!f) {
+        fprintf(stderr, "Failed to create default config at: %s\n", config_path);
+        return;
+    }
+
+    fprintf(f, "# SAM Configuration File\n\n");
+    fprintf(f, "# Model path (relative to executable or absolute)\n");
+    fprintf(f, "model=sam_vit_b-ggml-model-f16.bin\n\n");
+    fprintf(f, "# Number of CPU threads to use\n");
+    fprintf(f, "n_threads=4\n\n");
+    fprintf(f, "# Model parameters\n");
+    fprintf(f, "mask_threshold=0.0\n");
+    fprintf(f, "iou_threshold=0.88\n");
+    fprintf(f, "stability_score_threshold=0.95\n");
+    fprintf(f, "stability_score_offset=1.0\n");
+    fprintf(f, "eps=1e-6\n");
+    fprintf(f, "eps_decoder_transformer=1e-5\n");
+
+    fclose(f);
+}
+
+static gboolean read_config_file(app_context* ctx) {
+    const char* exe_dir = get_current_path();
+    if (!exe_dir) return FALSE;
+    
+    // Create config file path
+    char config_path[1024];
+    snprintf(config_path, sizeof(config_path), "%s/sam-config.txt", exe_dir);
+
+    // Try to open config file
+    FILE* f = fopen(config_path, "r");
+    if (!f) {
+        fprintf(stderr, "Config file not found at: %s\n", config_path);
+        return FALSE;
+    }
+
+    char line[1024];
+    while (fgets(line, sizeof(line), f)) {
+        // Remove newline
+        char* newline = strchr(line, '\n');
+        if (newline) *newline = '\0';
+
+        // Skip empty lines and comments
+        if (line[0] == '\0' || line[0] == '#') continue;
+
+        char key[256], value[768];
+        if (sscanf(line, "%255[^=]=%767s", key, value) == 2) {
+            // Trim whitespace
+            char* k = g_strstrip(key);
+            char* v = g_strstrip(value);
+
+            if (strcmp(k, "model") == 0) {
+                char model_path[1024];
+                snprintf(model_path, sizeof(model_path), "%s/%s", exe_dir, v);
+                ctx->sam_params.model = g_strdup(model_path);
+            } else if (strcmp(k, "mask_threshold") == 0) {
+                ctx->sam_params.mask_threshold = atof(v);
+            } else if (strcmp(k, "iou_threshold") == 0) {
+                ctx->sam_params.iou_threshold = atof(v);
+            } else if (strcmp(k, "stability_score_threshold") == 0) {
+                ctx->sam_params.stability_score_threshold = atof(v);
+            } else if (strcmp(k, "stability_score_offset") == 0) {
+                ctx->sam_params.stability_score_offset = atof(v);
+            } else if (strcmp(k, "eps") == 0) {
+                ctx->sam_params.eps = atof(v);
+            } else if (strcmp(k, "eps_decoder_transformer") == 0) {
+                ctx->sam_params.eps_decoder_transformer = atof(v);
+            } else if (strcmp(k, "n_threads") == 0) {
+                ctx->sam_params.n_threads = atoi(v);
+            }
+        }
+    }
+
+    fclose(f);
+    return TRUE;
+}
+
 static void app_context_init(app_context* ctx) {
     ctx->image_filename = NULL;
     ctx->image_width = 0;
@@ -53,9 +180,25 @@ static void app_context_init(app_context* ctx) {
     ctx->mask = NULL;
     ctx->computing = FALSE;
     ctx->mask_overlay = NULL;
-    // Initialize SAM parameters
+
+    // Initialize SAM parameters with defaults
     sam_params_init(&ctx->sam_params);
-    ctx->sam_params.model = "sam_vit_b-ggml-model-f16.bin";
+    
+    const char* exe_dir = get_current_path();
+    if (exe_dir) {
+        char config_path[1024];
+        snprintf(config_path, sizeof(config_path), "%s/sam-config.txt", exe_dir);
+
+        // Try to read config, create default if it doesn't exist
+        if (!read_config_file(ctx)) {
+            create_default_config(config_path);
+            // Try reading again
+            read_config_file(ctx);
+        }
+    } else {
+        // Fallback to default model path if we can't determine executable path
+        ctx->sam_params.model = "sam_vit_b-ggml-model-f16.bin";
+    }
 }
 
 static void app_context_free(app_context* ctx) {
