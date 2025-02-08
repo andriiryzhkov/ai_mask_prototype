@@ -1388,11 +1388,13 @@ prompt_encoder_result sam_encode_prompt(
             ggml_view_2d(ctx0, cur, cur->ne[0], 1, cur->nb[1], points.size() * cur->nb[1])));
     }
 
-    // add point_embeddings[1] to label == 1
+    // add point embeddings based on label (positive: pt_embd[1], negative: pt_embd[2])
     // ref: https://github.com/facebookresearch/segment-anything/blob/main/segment_anything/modeling/prompt_encoder.py#L90
     for (size_t i = 0; i < points.size(); i++) {
         struct ggml_tensor * v = ggml_view_2d(ctx0, cur, cur->ne[0], 1, cur->nb[1], i * cur->nb[1]);
-        ggml_build_forward_expand(gf, ggml_cpy(ctx0, ggml_add_inplace(ctx0, v, enc.pt_embd[1]), v));
+        // Use pt_embd[1] for positive points (label=1) and pt_embd[2] for negative points (label=0)
+        struct ggml_tensor * embd = points[i].label ? enc.pt_embd[1] : enc.pt_embd[2];
+        ggml_build_forward_expand(gf, ggml_cpy(ctx0, ggml_add_inplace(ctx0, v, embd), v));
     }
 
     struct ggml_tensor * embd_prompt_sparse = cur;
