@@ -153,7 +153,7 @@ static gboolean compute_image_embedding(app_context* ctx) {
     return result;
 }
 
-static gboolean compute_mask(app_context* ctx, click_point* pt) {
+static gboolean compute_mask(app_context* ctx, GArray* points) {
     if (!ctx->current_image || !ctx->sam_ctx) return FALSE;
 
     // Show spinner while computing
@@ -164,10 +164,20 @@ static gboolean compute_mask(app_context* ctx, click_point* pt) {
 
     int n_masks = 0;
     sam_image_t* masks = NULL;
-    sam_point_t sam_pt = { pt->x, pt->y, pt->label };
+
+    // Create array of sam_point_t from click_points
+    sam_point_t* sam_points = malloc(points->len * sizeof(sam_point_t));
+    for (guint i = 0; i < points->len; i++) {
+        click_point* pt = &g_array_index(points, click_point, i);
+        sam_points[i].x = pt->x;
+        sam_points[i].y = pt->y;
+        sam_points[i].label = pt->label;
+    }
     
     masks = sam_compute_masks(ctx->sam_ctx, ctx->current_image, 
-                            ctx->sam_params.n_threads, &sam_pt, 1, &n_masks, 255, 0);
+                              ctx->sam_params.n_threads,
+                              sam_points, points->len,
+                              &n_masks, 255, 0);
 
     // Hide spinner
     ctx->computing = FALSE;
@@ -430,7 +440,7 @@ static gboolean on_button_press(GtkWidget* widget, GdkEventButton* event, app_co
         g_array_append_val(ctx->points, pt);
 
         // Compute new mask using this point
-        compute_mask(ctx, &pt);
+        compute_mask(ctx, ctx->points);
 
         gtk_widget_queue_draw(widget);
     }

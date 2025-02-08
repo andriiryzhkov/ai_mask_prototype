@@ -1351,16 +1351,17 @@ struct prompt_encoder_result {
 // TODO: currently just encode a single point for simplicity
 //
 prompt_encoder_result sam_encode_prompt(
-       const sam_ggml_model & model,
-        struct ggml_context * ctx0,
-         struct ggml_cgraph * gf,
-             sam_ggml_state & state) {
+            const sam_ggml_model & model,
+             struct ggml_context * ctx0,
+              struct ggml_cgraph * gf,
+                  sam_ggml_state & state,
+    const std::vector<sam_point> & points) {
 
     const auto & hparams = model.hparams;
     const auto & enc = model.enc_prompt;
 
-    struct ggml_tensor * inp = ggml_new_tensor_2d(ctx0, GGML_TYPE_F32, 2, 2);
-    // struct ggml_tensor * inp = ggml_new_tensor_2d(ctx0, GGML_TYPE_F32, 2, points.size()); // 2 for x, y; points.size() for number of points
+    // Create input tensor with size for all points
+    struct ggml_tensor * inp = ggml_new_tensor_2d(ctx0, GGML_TYPE_F32, 2, points.size() + 1); // +1 for padding
     ggml_set_name(inp, "prompt_input");
     ggml_set_input(inp);
 
@@ -1382,14 +1383,17 @@ prompt_encoder_result sam_encode_prompt(
 
         // overwrite label == -1 with not_a_point_embed.weight
         // ref: https://github.com/facebookresearch/segment-anything/blob/main/segment_anything/modeling/prompt_encoder.py#L86
-        // TODO: extend for multiple points
-        ggml_build_forward_expand(gf, ggml_cpy(ctx0, enc.not_a_pt_embd_w, ggml_view_2d(ctx0, cur, cur->ne[0], 1, cur->nb[1], cur->nb[1])));
+        // Handle not_a_point_embed for padding
+        ggml_build_forward_expand(gf, ggml_cpy(ctx0, enc.not_a_pt_embd_w, 
+            ggml_view_2d(ctx0, cur, cur->ne[0], 1, cur->nb[1], points.size() * cur->nb[1])));
     }
 
     // add point_embeddings[1] to label == 1
     // ref: https://github.com/facebookresearch/segment-anything/blob/main/segment_anything/modeling/prompt_encoder.py#L90
-    struct ggml_tensor * v = ggml_view_2d(ctx0, cur, cur->ne[0], 1, cur->nb[1], 0);
-    ggml_build_forward_expand(gf, ggml_cpy(ctx0, ggml_add_inplace(ctx0, v, enc.pt_embd[1]), v));
+    for (size_t i = 0; i < points.size(); i++) {
+        struct ggml_tensor * v = ggml_view_2d(ctx0, cur, cur->ne[0], 1, cur->nb[1], i * cur->nb[1]);
+        ggml_build_forward_expand(gf, ggml_cpy(ctx0, ggml_add_inplace(ctx0, v, enc.pt_embd[1]), v));
+    }
 
     struct ggml_tensor * embd_prompt_sparse = cur;
     ggml_build_forward_expand(gf, embd_prompt_sparse);
@@ -1502,6 +1506,9 @@ bool sam_decode_mask(
     const auto & hparams = model.hparams;
     const auto & dec = model.dec;
     const int n_img_embd = hparams.n_img_embd();
+
+    // Get the actual number of points plus 1 for padding
+    const int n_points = prompt.embd_prompt_sparse->ne[1];
 
     struct ggml_tensor * tokens = {};
     {
@@ -1902,14 +1909,12 @@ struct ggml_cgraph  * sam_build_fast_graph(
         /*.no_alloc   =*/ true, // skip allocating as we use ggml_alloc to allocate exact memory requirements
     };
     
-    sam_point point = points[0]; // TODO: remove to support multiple points
-
     struct ggml_context * ctx0   = ggml_init(ggml_params);
     struct ggml_cgraph  * gf     = ggml_new_graph(ctx0);
 
-    prompt_encoder_result enc_res = sam_encode_prompt(model, ctx0, gf, state);
+    prompt_encoder_result enc_res = sam_encode_prompt(model, ctx0, gf, state, points);
     if (!enc_res.embd_prompt_sparse || !enc_res.embd_prompt_dense) {
-        fprintf(stderr, "%s: failed to encode prompt (%f, %f)\n", __func__, point.x, point.y);
+        fprintf(stderr, "%s: failed to encode prompt with %zu points\n", __func__, points.size());
         return {};
     }
 
@@ -1932,29 +1937,28 @@ struct ggml_cgraph  * sam_build_fast_graph(
     {
         // transform points
         // ref: https://github.com/facebookresearch/segment-anything/blob/main/segment_anything/automatic_mask_generator.py#L276
-        {
-            const int nmax = std::max(nx, ny);
-
-            const float scale = model.hparams.n_img_size() / (float) nmax;
-
-            const int nx_new = int(nx*scale + 0.5f);
-            const int ny_new = int(ny*scale + 0.5f);
-
-            point.x = point.x*(float(nx_new)/nx) + 0.5f;
-            point.y = point.y*(float(ny_new)/ny) + 0.5f;
-        }
+        const int nmax = std::max(nx, ny);
+        const float scale = model.hparams.n_img_size() / (float) nmax;
+        const int nx_new = int(nx*scale + 0.5f);
+        const int ny_new = int(ny*scale + 0.5f);
 
         struct ggml_tensor * inp = ggml_graph_get_tensor(gf, "prompt_input");
-        // set the input by converting the [0, 1] coordinates to [-1, 1]
         float * data = (float *) inp->data;
 
-        data[0] = 2.0f*(point.x / model.hparams.n_img_size()) - 1.0f;
-        data[1] = 2.0f*(point.y / model.hparams.n_img_size()) - 1.0f;
+        // transform each point
+        for (size_t i = 0; i < points.size(); i++) {
+            sam_point transformed = points[i];
+            transformed.x = transformed.x*(float(nx_new)/nx) + 0.5f;
+            transformed.y = transformed.y*(float(ny_new)/ny) + 0.5f;
+
+            data[i*2 + 0] = 2.0f*(transformed.x / model.hparams.n_img_size()) - 1.0f;
+            data[i*2 + 1] = 2.0f*(transformed.y / model.hparams.n_img_size()) - 1.0f;
+        }
 
         // padding
         // ref: https://github.com/facebookresearch/segment-anything/blob/main/segment_anything/modeling/prompt_encoder.py#L81-L85
-        data[2] = 2.0f*(0.0f) - 1.0f;
-        data[3] = 2.0f*(0.0f) - 1.0f;
+        data[points.size()*2 + 0] = 2.0f*(0.0f) - 1.0f;
+        data[points.size()*2 + 1] = 2.0f*(0.0f) - 1.0f;
     }
 
     // from sam_fill_dense_pe
@@ -2074,6 +2078,11 @@ std::vector<sam_image_u8> sam_compute_masks(
         return {};
     }
 
+    if (points.empty()) {
+        fprintf(stderr, "%s: no points provided\n", __func__);
+        return {};
+    }
+
     const int64_t t_start_ms = ggml_time_ms();
 
     static size_t buf_size = 256u*1024*1024;
@@ -2094,13 +2103,11 @@ std::vector<sam_image_u8> sam_compute_masks(
 
     st.iou_predictions = ggml_new_tensor_1d(st.ctx_masks, GGML_TYPE_F32, 3);
 
-
-
     st.buf_compute_fast.resize(ggml_tensor_overhead()*GGML_DEFAULT_GRAPH_SIZE + ggml_graph_overhead());
     st.allocr = ggml_gallocr_new(ggml_backend_cpu_buffer_type());
 
     // TODO: more varied prompts
-    fprintf(stderr, "prompts:\n");
+    fprintf(stderr, "prompt:\n");
     for (const auto& pt: points) {
         fprintf(stderr, "        (%f, %f, %d)\n", pt.x, pt.y, pt.label);
     }
