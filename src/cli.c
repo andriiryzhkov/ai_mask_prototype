@@ -1,4 +1,5 @@
 #include "sam-c.h"
+#include "sam-config.h"
 #define STB_IMAGE_IMPLEMENTATION
 #include "stb_image.h"
 #define STB_IMAGE_WRITE_IMPLEMENTATION
@@ -161,7 +162,7 @@ bool sam_params_parse(int argc, char** argv, sam_params_t* params) {
 int main(int argc, char** argv) {
     sam_params_t params;
     sam_params_init(&params);
-    params.model = "ggml-model-f16.bin";
+    get_params_from_config_file(&params);
 
     sam_image_t img = {0};
     int n_masks = 0;

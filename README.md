@@ -59,20 +59,20 @@ Run command line inference
 or 
 
 ```bash
-./build/bin/sam_cli.exe -t 12 -i ./images/in/example1.jpg -o ./images/out/example1 -p "2070, 1170, 1" -m ./weights/sam_vit_b-ggml-model-f16.bin 
-./build/bin/sam_cli.exe -t 12 -i ./images/in/example2.jpg -o ./images/out/example2 -p "650, 700, 1" -m ./weights/sam_vit_b-ggml-model-f16.bin 
+./build/bin/sam_cli.exe -i ./images/in/example1.jpg -o ./images/out/example1 -p "2070, 1170, 1"
+./build/bin/sam_cli.exe -i ./images/in/example2.jpg -o ./images/out/example2 -p "650, 700, 1" 
 ```
 
 GTK3 application
 
 ```bash
-cd ./build/bin && ./sam_gui
+./build/bin/sam_gui
 ```
 
 or
 
 ```bash
-cd ./build/bin && ./sam_gui.exe
+./build/bin/sam_gui.exe
 ```
 
 ## Sample images

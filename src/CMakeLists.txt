@@ -23,6 +23,10 @@ add_library(sam_c SHARED
     sam-c.cpp
     sam-c.h
 )
+add_library(sam_config SHARED
+    sam-config.c
+    sam-config.h
+)
 
 # Set version properties
 set_target_properties(sam PROPERTIES
@@ -33,8 +37,13 @@ set_target_properties(sam_c PROPERTIES
     VERSION 1.0.0
     SOVERSION 1)
 
+set_target_properties(sam_config PROPERTIES 
+    VERSION 1.0.0
+    SOVERSION 1)
+
 target_link_libraries(sam PRIVATE ggml)
 target_link_libraries(sam_c PRIVATE sam)
+target_link_libraries(sam_config PRIVATE sam)
 
 set(CLI_SOURCES cli.c)
 set(CLI_TARGET sam_cli)
@@ -44,6 +53,7 @@ target_link_libraries(${CLI_TARGET} PRIVATE
     ggml
     sam
     sam_c
+    sam_config
 )
 
 set(GUI_SOURCES gui.c)
@@ -54,6 +64,7 @@ target_link_libraries(${GUI_TARGET} PRIVATE
     ggml
     sam
     sam_c
+    sam_config
     ${GTK_LIBRARIES}
 )
 
@@ -92,7 +103,7 @@ if(WIN32)
     )
 
     # Install libraries
-    install(TARGETS sam sam_c ggml
+    install(TARGETS sam sam_c sam_config ggml
         RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}
         LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}
         ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR}
@@ -100,14 +111,23 @@ if(WIN32)
 
     # Install only required GTK DLLs
     set(REQUIRED_DLLS
+        libatk-1.0-0.dll
+        libc++.dll
+        libcairo-gobject-2.dll
         libgtk-3-0.dll
         libgdk-3-0.dll
         libgdk_pixbuf-2.0-0.dll
+        libintl-8.dll
         libpango-1.0-0.dll
         libpangocairo-1.0-0.dll
         libpangoft2-1.0-0.dll
         libpangowin32-1.0-0.dll
+        libpixman-1-0.dll
+        libpng16-16.dll
+        libfribidi-0.dll
+        libgio-2.0-0.dll
         libglib-2.0-0.dll
+        libgmodule-2.0-0.dll
         libgobject-2.0-0.dll
         libcairo-2.dll
         libfontconfig-1.dll

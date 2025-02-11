@@ -1,11 +1,7 @@
 #include "sam-c.h"
+#include "sam-config.h"
 
 #include <string.h>
-#ifdef _WIN32
-#include <windows.h>
-#else
-#include <unistd.h>
-#endif
 #include <gtk/gtk.h>
 #define STB_IMAGE_IMPLEMENTATION
 #include "stb_image.h"
@@ -18,7 +14,7 @@ typedef struct {
     int label;      // 1 for positive, 0 for negative
 } click_point;
 
-typedef struct {
+typedef struct app_context {
     // Image data
     char* image_filename;
     int image_width;
@@ -46,161 +42,6 @@ typedef struct {
     GdkPixbuf* mask_overlay;  // For displaying the computed mask
 } app_context;
 
-static char* get_current_path() {
-    static char exe_path[1024];  // Static buffer to store the path
-    
-#ifdef _WIN32
-    // Windows version
-    DWORD len = GetModuleFileName(NULL, exe_path, sizeof(exe_path)-1);
-    if (len == 0 || len == sizeof(exe_path)-1) {
-        fprintf(stderr, "Failed to get executable path\n");
-        return NULL;
-    }
-    exe_path[len] = '\0';
-#else
-    // Linux/Unix version
-    ssize_t len = readlink("/proc/self/exe", exe_path, sizeof(exe_path)-1);
-    if (len == -1) {
-        fprintf(stderr, "Failed to get executable path\n");
-        return NULL;
-    }
-    exe_path[len] = '\0';
-#endif
-
-    // Get directory by removing executable name
-    char* last_slash = NULL;
-#ifdef _WIN32
-    // Windows: look for both forward and backward slashes
-    char* last_forward = strrchr(exe_path, '/');
-    char* last_backward = strrchr(exe_path, '\\');
-    if (last_forward && last_backward) {
-        last_slash = (last_forward > last_backward) ? last_forward : last_backward;
-    } else {
-        last_slash = last_forward ? last_forward : last_backward;
-    }
-#else
-    last_slash = strrchr(exe_path, '/');
-#endif
-
-    if (last_slash != NULL) {
-        *last_slash = '\0';
-    }
-    
-    return exe_path;
-}
-
-static void create_default_config(const char* config_path) {
-    FILE* f = fopen(config_path, "w");
-    if (!f) {
-        fprintf(stderr, "Failed to create default config at: %s\n", config_path);
-        return;
-    }
-
-    fprintf(f, "# SAM Configuration File\n\n");
-    fprintf(f, "# Model path (relative to executable or absolute)\n");
-    fprintf(f, "model=sam_vit_b-ggml-model-f16.bin\n\n");
-    fprintf(f, "# Number of CPU threads to use\n");
-    fprintf(f, "n_threads=4\n\n");
-    fprintf(f, "# Model parameters\n");
-    fprintf(f, "mask_threshold=0.0\n");
-    fprintf(f, "iou_threshold=0.88\n");
-    fprintf(f, "stability_score_threshold=0.95\n");
-    fprintf(f, "stability_score_offset=1.0\n");
-    fprintf(f, "eps=1e-6\n");
-    fprintf(f, "eps_decoder_transformer=1e-5\n");
-
-    fclose(f);
-}
-
-static gboolean read_config_file(app_context* ctx) {
-    const char* exe_dir = get_current_path();
-    if (!exe_dir) return FALSE;
-    
-    // Create config file path
-    char config_path[1024];
-    snprintf(config_path, sizeof(config_path), "%s/sam-config.txt", exe_dir);
-
-    // Try to open config file
-    FILE* f = fopen(config_path, "r");
-    if (!f) {
-        fprintf(stderr, "Config file not found at: %s\n", config_path);
-        return FALSE;
-    }
-
-    char line[1024];
-    while (fgets(line, sizeof(line), f)) {
-        // Remove newline
-        char* newline = strchr(line, '\n');
-        if (newline) *newline = '\0';
-
-        // Skip empty lines and comments
-        if (line[0] == '\0' || line[0] == '#') continue;
-
-        char key[256], value[768];
-        if (sscanf(line, "%255[^=]=%767s", key, value) == 2) {
-            // Trim whitespace
-            char* k = g_strstrip(key);
-            char* v = g_strstrip(value);
-
-            if (strcmp(k, "model") == 0) {
-                char model_path[1024];
-                snprintf(model_path, sizeof(model_path), "%s/%s", exe_dir, v);
-                ctx->sam_params.model = g_strdup(model_path);
-            } else if (strcmp(k, "mask_threshold") == 0) {
-                ctx->sam_params.mask_threshold = atof(v);
-            } else if (strcmp(k, "iou_threshold") == 0) {
-                ctx->sam_params.iou_threshold = atof(v);
-            } else if (strcmp(k, "stability_score_threshold") == 0) {
-                ctx->sam_params.stability_score_threshold = atof(v);
-            } else if (strcmp(k, "stability_score_offset") == 0) {
-                ctx->sam_params.stability_score_offset = atof(v);
-            } else if (strcmp(k, "eps") == 0) {
-                ctx->sam_params.eps = atof(v);
-            } else if (strcmp(k, "eps_decoder_transformer") == 0) {
-                ctx->sam_params.eps_decoder_transformer = atof(v);
-            } else if (strcmp(k, "n_threads") == 0) {
-                ctx->sam_params.n_threads = atoi(v);
-            }
-        }
-    }
-
-    fclose(f);
-    return TRUE;
-}
-
-static void app_context_init(app_context* ctx) {
-    ctx->image_filename = NULL;
-    ctx->image_width = 0;
-    ctx->image_height = 0;
-    ctx->image_pixbuf = NULL;
-    ctx->image_scale = 1.0;
-    ctx->points = g_array_new(FALSE, TRUE, sizeof(click_point));
-    ctx->sam_ctx = NULL;
-    ctx->current_image = NULL;
-    ctx->mask = NULL;
-    ctx->computing = FALSE;
-    ctx->mask_overlay = NULL;
-
-    // Initialize SAM parameters with defaults
-    sam_params_init(&ctx->sam_params);
-    
-    const char* exe_dir = get_current_path();
-    if (exe_dir) {
-        char config_path[1024];
-        snprintf(config_path, sizeof(config_path), "%s/sam-config.txt", exe_dir);
-
-        // Try to read config, create default if it doesn't exist
-        if (!read_config_file(ctx)) {
-            create_default_config(config_path);
-            // Try reading again
-            read_config_file(ctx);
-        }
-    } else {
-        // Fallback to default model path if we can't determine executable path
-        ctx->sam_params.model = "sam_vit_b-ggml-model-f16.bin";
-    }
-}
-
 static void app_context_free(app_context* ctx) {
     g_free(ctx->image_filename);
     if (ctx->image_pixbuf) g_object_unref(ctx->image_pixbuf);
@@ -215,6 +56,41 @@ static void app_context_free(app_context* ctx) {
     }
     if (ctx->sam_ctx) sam_free(ctx->sam_ctx);
     if (ctx->mask_overlay) g_object_unref(ctx->mask_overlay);
+}
+
+static app_context* app_context_new(void) {
+    app_context* ctx = malloc(sizeof(app_context));
+    if (!ctx) {
+        g_print("Failed to allocate memory for context\n"); // More specific error message
+        return NULL;
+    }
+
+    ctx->image_filename = NULL;
+    ctx->image_width = 0;
+    ctx->image_height = 0;
+    ctx->image_pixbuf = NULL;
+    ctx->image_scale = 1.0;
+    ctx->points = g_array_new(FALSE, TRUE, sizeof(click_point));
+    ctx->sam_ctx = NULL;
+    ctx->current_image = NULL;
+    ctx->mask = NULL;
+    ctx->computing = FALSE;
+    ctx->mask_overlay = NULL;
+    ctx->window = NULL;
+    ctx->drawing_area = NULL;
+    ctx->load_button = NULL;
+    ctx->clear_button = NULL;
+    ctx->save_button = NULL;
+    ctx->spinner = NULL;
+
+    sam_params_init(&ctx->sam_params);
+    if (!get_params_from_config_file(&ctx->sam_params)) {
+        g_print("Failed to initialize context due to config loading error\n");
+        app_context_free(ctx);
+        return NULL;
+    }
+
+    return ctx;
 }
 
 static void app_context_clear_points(app_context* ctx) {
@@ -265,7 +141,14 @@ static void clear_prompts(app_context* ctx) {
 }
 
 static gboolean load_sam_model(app_context* ctx) {
+    if (!ctx || !ctx->sam_params.model || !*ctx->sam_params.model) {
+        g_print("Invalid model path\n");
+        return FALSE;
+    }
+
     if (ctx->sam_ctx) return TRUE;  // Already loaded
+
+    g_print("Model: %s\n", ctx->sam_params.model);
     
     ctx->sam_ctx = sam_load_model(&ctx->sam_params);
     return ctx->sam_ctx != NULL;
@@ -595,60 +478,62 @@ int main(int argc, char* argv[]) {
     gtk_init(&argc, &argv);
     
     // Create and initialize context
-    app_context ctx;
-    app_context_init(&ctx);
-    
+    app_context* ctx = app_context_new();
+    if (!ctx) {
+        g_print("Failed to initialize context\n");
+        return 1;
+    }
     // Create main window
-    ctx.window = gtk_window_new(GTK_WINDOW_TOPLEVEL);
-    gtk_window_set_title(GTK_WINDOW(ctx.window), "AI Object Mask Demo");
-    gtk_window_set_default_size(GTK_WINDOW(ctx.window), 1200, 800);
-    g_signal_connect(ctx.window, "destroy", G_CALLBACK(gtk_main_quit), NULL);
+    ctx->window = gtk_window_new(GTK_WINDOW_TOPLEVEL);
+    gtk_window_set_title(GTK_WINDOW(ctx->window), "AI Object Mask Demo");
+    gtk_window_set_default_size(GTK_WINDOW(ctx->window), 1200, 800);
+    g_signal_connect(ctx->window, "destroy", G_CALLBACK(gtk_main_quit), NULL);
     
     // Create vertical box for layout
     GtkWidget* vbox = gtk_box_new(GTK_ORIENTATION_VERTICAL, 5);
-    gtk_container_add(GTK_CONTAINER(ctx.window), vbox);
+    gtk_container_add(GTK_CONTAINER(ctx->window), vbox);
     
     // Create button box
     GtkWidget* button_box = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 5);
     gtk_box_pack_start(GTK_BOX(vbox), button_box, FALSE, FALSE, 5);
     
     // Create buttons
-    ctx.load_button = gtk_button_new_with_label("Load Image");
-    ctx.clear_button = gtk_button_new_with_label("Clear Prompts");
-    ctx.save_button = gtk_button_new_with_label("Save Mask");
-    gtk_box_pack_start(GTK_BOX(button_box), ctx.load_button, FALSE, FALSE, 5);
-    gtk_box_pack_start(GTK_BOX(button_box), ctx.clear_button, FALSE, FALSE, 5);
-    gtk_box_pack_start(GTK_BOX(button_box), ctx.save_button, FALSE, FALSE, 5);
+    ctx->load_button = gtk_button_new_with_label("Load Image");
+    ctx->clear_button = gtk_button_new_with_label("Clear Prompts");
+    ctx->save_button = gtk_button_new_with_label("Save Mask");
+    gtk_box_pack_start(GTK_BOX(button_box), ctx->load_button, FALSE, FALSE, 5);
+    gtk_box_pack_start(GTK_BOX(button_box), ctx->clear_button, FALSE, FALSE, 5);
+    gtk_box_pack_start(GTK_BOX(button_box), ctx->save_button, FALSE, FALSE, 5);
     
-    g_signal_connect(ctx.load_button, "clicked", G_CALLBACK(on_load_button_clicked), &ctx);
-    g_signal_connect(ctx.clear_button, "clicked", G_CALLBACK(on_clear_button_clicked), &ctx);
-    g_signal_connect(ctx.save_button, "clicked", G_CALLBACK(on_save_button_clicked), &ctx);
+    g_signal_connect(ctx->load_button, "clicked", G_CALLBACK(on_load_button_clicked), ctx);
+    g_signal_connect(ctx->clear_button, "clicked", G_CALLBACK(on_clear_button_clicked), ctx);
+    g_signal_connect(ctx->save_button, "clicked", G_CALLBACK(on_save_button_clicked), ctx);
 
     // Create overlay for drawing area and spinner
     GtkWidget* overlay = gtk_overlay_new();
     gtk_box_pack_start(GTK_BOX(vbox), overlay, TRUE, TRUE, 0);
 
     // Create drawing area
-    ctx.drawing_area = gtk_drawing_area_new();
-    gtk_widget_set_size_request(ctx.drawing_area, 400, 300);
+    ctx->drawing_area = gtk_drawing_area_new();
+    gtk_widget_set_size_request(ctx->drawing_area, 400, 300);
     // gtk_box_pack_start(GTK_BOX(vbox), ctx.drawing_area, TRUE, TRUE, 0);
-    gtk_container_add(GTK_CONTAINER(overlay), ctx.drawing_area);
+    gtk_container_add(GTK_CONTAINER(overlay), ctx->drawing_area);
     
-    g_signal_connect(ctx.drawing_area, "draw", G_CALLBACK(on_draw), &ctx);
-    g_signal_connect(ctx.drawing_area, "button-press-event", G_CALLBACK(on_button_press), &ctx);
-    gtk_widget_set_events(ctx.drawing_area, gtk_widget_get_events(ctx.drawing_area) | 
+    g_signal_connect(ctx->drawing_area, "draw", G_CALLBACK(on_draw), ctx);
+    g_signal_connect(ctx->drawing_area, "button-press-event", G_CALLBACK(on_button_press), ctx);
+    gtk_widget_set_events(ctx->drawing_area, gtk_widget_get_events(ctx->drawing_area) | 
                          GDK_BUTTON_PRESS_MASK);
 
     // Create and position spinner
-    ctx.spinner = gtk_spinner_new();
-    gtk_widget_set_halign(ctx.spinner, GTK_ALIGN_CENTER);
-    gtk_widget_set_valign(ctx.spinner, GTK_ALIGN_CENTER);
-    gtk_overlay_add_overlay(GTK_OVERLAY(overlay), ctx.spinner);
-    gtk_widget_hide(ctx.spinner);  // Initially hidden
+    ctx->spinner = gtk_spinner_new();
+    gtk_widget_set_halign(ctx->spinner, GTK_ALIGN_CENTER);
+    gtk_widget_set_valign(ctx->spinner, GTK_ALIGN_CENTER);
+    gtk_overlay_add_overlay(GTK_OVERLAY(overlay), ctx->spinner);
+    gtk_widget_hide(ctx->spinner);  // Initially hidden
 
     // Load SAM model
-    if (!load_sam_model(&ctx)) {
-        GtkWidget* dialog = gtk_message_dialog_new(GTK_WINDOW(ctx.window),
+    if (!load_sam_model(ctx)) {
+        GtkWidget* dialog = gtk_message_dialog_new(GTK_WINDOW(ctx->window),
                                                  GTK_DIALOG_DESTROY_WITH_PARENT,
                                                  GTK_MESSAGE_ERROR,
                                                  GTK_BUTTONS_CLOSE,
@@ -659,13 +544,14 @@ int main(int argc, char* argv[]) {
     }
 
     // Show all widgets
-    gtk_widget_show_all(ctx.window);
+    gtk_widget_show_all(ctx->window);
     
     // Start main loop
     gtk_main();
     
     // Cleanup
-    app_context_free(&ctx);
-    
+    app_context_free(ctx);
+    free(ctx);
+
     return 0;
 }
