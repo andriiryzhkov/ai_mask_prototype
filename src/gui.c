@@ -40,6 +40,9 @@ typedef struct app_context {
     GtkWidget* spinner;      // Spinner widget for loading indication
     gboolean computing;      // Flag to track if we're computing embeddings
     GdkPixbuf* mask_overlay;  // For displaying the computed mask
+    GtkWidget* encoding_overlay;     // Overlay widget for encoding message
+    GtkWidget* encoding_label;       // Label for encoding message
+    gboolean is_encoding;            // Flag to track encoding state
 } app_context;
 
 static void app_context_free(app_context* ctx) {
@@ -58,6 +61,7 @@ static void app_context_free(app_context* ctx) {
     if (ctx->mask_overlay) g_object_unref(ctx->mask_overlay);
 }
 
+// Create new app_context
 static app_context* app_context_new(void) {
     app_context* ctx = malloc(sizeof(app_context));
     if (!ctx) {
@@ -82,7 +86,10 @@ static app_context* app_context_new(void) {
     ctx->clear_button = NULL;
     ctx->save_button = NULL;
     ctx->spinner = NULL;
-
+    ctx->encoding_overlay = NULL;
+    ctx->encoding_label = NULL;
+    ctx->is_encoding = FALSE;
+        
     sam_params_init(&ctx->sam_params);
     if (!get_params_from_config_file(&ctx->sam_params)) {
         g_print("Failed to initialize context due to config loading error\n");
@@ -93,11 +100,13 @@ static app_context* app_context_new(void) {
     return ctx;
 }
 
+// Clear click points
 static void app_context_clear_points(app_context* ctx) {
     g_array_set_size(ctx->points, 0);
     gtk_widget_queue_draw(ctx->drawing_area);
 }
 
+// Clear image data
 static void app_context_clear_image(app_context* ctx) {
     if (ctx->current_image) {
         free(ctx->current_image->data);
@@ -119,6 +128,7 @@ static void app_context_clear_image(app_context* ctx) {
     }
 }
 
+// Clear all prompts and mask
 static void clear_prompts(app_context* ctx) {
     // Clear points
     g_array_set_size(ctx->points, 0);
@@ -140,6 +150,7 @@ static void clear_prompts(app_context* ctx) {
     gtk_widget_queue_draw(ctx->drawing_area);
 }
 
+// Load SAM model from file
 static gboolean load_sam_model(app_context* ctx) {
     if (!ctx || !ctx->sam_params.model || !*ctx->sam_params.model) {
         g_print("Invalid model path\n");
@@ -154,31 +165,51 @@ static gboolean load_sam_model(app_context* ctx) {
     return ctx->sam_ctx != NULL;
 }
 
-static gboolean compute_image_embedding(app_context* ctx) {
-    if (!ctx->current_image || !ctx->sam_ctx) return FALSE;
+// Show/hide encoding overlay
+static void set_encoding_state(app_context* ctx, gboolean encoding) {
+    ctx->is_encoding = encoding;
+    if (encoding) {
+        gtk_widget_show(ctx->encoding_overlay);
+        gtk_widget_show(ctx->encoding_label);
+    } else {
+        gtk_widget_hide(ctx->encoding_overlay);
+        gtk_widget_hide(ctx->encoding_label);
+    }
     
-    // Disable interaction and show spinner
-    ctx->computing = TRUE;
-    gtk_widget_set_sensitive(ctx->window, FALSE);
-    gtk_widget_show(ctx->spinner);
-    gtk_spinner_start(GTK_SPINNER(ctx->spinner));
+    // Block/unblock mouse events on drawing area
+    gtk_widget_set_sensitive(ctx->drawing_area, !encoding);
     
-    // Process events to show spinner
+    // Process events to update UI
     while (gtk_events_pending()) gtk_main_iteration();
+}
+
+// Modify compute_image_embedding to run in background
+static gboolean compute_image_embedding_idle(gpointer user_data) {
+    app_context* ctx = (app_context*)user_data;
     
     // Compute embeddings
     gboolean result = sam_compute_image_embeddings(ctx->sam_ctx, ctx->current_image, 
                                                  ctx->sam_params.n_threads);
     
-    // Re-enable interaction and hide spinner
-    ctx->computing = FALSE;
-    gtk_widget_set_sensitive(ctx->window, TRUE);
-    gtk_spinner_stop(GTK_SPINNER(ctx->spinner));
-    gtk_widget_hide(ctx->spinner);
+    // Update UI in main thread
+    set_encoding_state(ctx, FALSE);
     
-    return result;
+    return FALSE; // Don't repeat
 }
 
+// Start computation of image embeddings
+static void start_compute_image_embedding(app_context* ctx) {
+    if (!ctx->current_image || !ctx->sam_ctx) return;
+    
+    // Show overlay and block interaction
+    set_encoding_state(ctx, TRUE);
+
+        
+    // Schedule computation in background
+    g_idle_add(compute_image_embedding_idle, ctx);
+}
+
+// Compute mask using click points
 static gboolean compute_mask(app_context* ctx, GArray* points) {
     if (!ctx->current_image || !ctx->sam_ctx) return FALSE;
 
@@ -256,6 +287,7 @@ static gboolean compute_mask(app_context* ctx, GArray* points) {
     return TRUE;
 }
 
+// Callbacks on "Load image" button click
 static void on_load_button_clicked(GtkButton* button, app_context* ctx) {
     GtkWidget* dialog = gtk_file_chooser_dialog_new("Open Image",
                                                    GTK_WINDOW(ctx->window),
@@ -304,21 +336,23 @@ static void on_load_button_clicked(GtkButton* button, app_context* ctx) {
             }
             
             gtk_widget_queue_draw(ctx->drawing_area);
+
+            // Start background computation
+            start_compute_image_embedding(ctx);
         }
         
         g_free(filename);
     }
     
     gtk_widget_destroy(dialog);
-
-    // Compute image embeddings after the image is shown
-    compute_image_embedding(ctx);
 }
 
+// Callbacks on "Clear prompts" button click
 static void on_clear_button_clicked(GtkButton* button, app_context* ctx) {
     clear_prompts(ctx);
 }
 
+// Callbacks on "Save mask" button click
 static void on_save_button_clicked(GtkButton* button, app_context* ctx) {
     if (!ctx->image_pixbuf || ctx->computing) return;
 
@@ -379,6 +413,7 @@ static void on_save_button_clicked(GtkButton* button, app_context* ctx) {
     gtk_widget_destroy(dialog);
 }
 
+// Draw callback for drawing area
 static gboolean on_draw(GtkWidget* widget, cairo_t* cr, app_context* ctx) {
     GtkAllocation allocation;
     gtk_widget_get_allocation(widget, &allocation);
@@ -436,8 +471,9 @@ static gboolean on_draw(GtkWidget* widget, cairo_t* cr, app_context* ctx) {
     return FALSE;
 }
 
+// Callback for button press event on drawing area
 static gboolean on_button_press(GtkWidget* widget, GdkEventButton* event, app_context* ctx) {
-    if (!ctx->image_pixbuf) return FALSE;
+    if (!ctx->image_pixbuf || ctx->is_encoding) return FALSE;
     
     GtkAllocation allocation;
     gtk_widget_get_allocation(widget, &allocation);
@@ -474,6 +510,7 @@ static gboolean on_button_press(GtkWidget* widget, GdkEventButton* event, app_co
     return TRUE;
 }
 
+// Main function
 int main(int argc, char* argv[]) {
     gtk_init(&argc, &argv);
     
@@ -516,7 +553,6 @@ int main(int argc, char* argv[]) {
     // Create drawing area
     ctx->drawing_area = gtk_drawing_area_new();
     gtk_widget_set_size_request(ctx->drawing_area, 400, 300);
-    // gtk_box_pack_start(GTK_BOX(vbox), ctx.drawing_area, TRUE, TRUE, 0);
     gtk_container_add(GTK_CONTAINER(overlay), ctx->drawing_area);
     
     g_signal_connect(ctx->drawing_area, "draw", G_CALLBACK(on_draw), ctx);
@@ -524,12 +560,39 @@ int main(int argc, char* argv[]) {
     gtk_widget_set_events(ctx->drawing_area, gtk_widget_get_events(ctx->drawing_area) | 
                          GDK_BUTTON_PRESS_MASK);
 
+                             // Create encoding overlay
+    ctx->encoding_overlay = gtk_box_new(GTK_ORIENTATION_VERTICAL, 0);
+    gtk_widget_set_halign(ctx->encoding_overlay, GTK_ALIGN_FILL);
+    gtk_widget_set_valign(ctx->encoding_overlay, GTK_ALIGN_FILL);
+    
+    // Set semi-transparent grey background
+    GtkStyleContext* style_context = gtk_widget_get_style_context(ctx->encoding_overlay);
+    GtkCssProvider* provider = gtk_css_provider_new();
+    gtk_css_provider_load_from_data(provider,
+        "box { background-color: rgba(128, 128, 128, 0.7); }", -1, NULL);
+    gtk_style_context_add_provider(style_context,
+        GTK_STYLE_PROVIDER(provider), GTK_STYLE_PROVIDER_PRIORITY_APPLICATION);
+    g_object_unref(provider);
+    
+    // Create and add encoding label
+    ctx->encoding_label = gtk_label_new("Encoding image...");
+    gtk_widget_set_name(ctx->encoding_label, "encoding-label");
+    provider = gtk_css_provider_new();
+    gtk_css_provider_load_from_data(provider,
+        "label { color: white; font-size: 24px; }", -1, NULL);
+    style_context = gtk_widget_get_style_context(ctx->encoding_label);
+    gtk_style_context_add_provider(style_context,
+        GTK_STYLE_PROVIDER(provider), GTK_STYLE_PROVIDER_PRIORITY_APPLICATION);
+    g_object_unref(provider);
+    
+    gtk_box_pack_start(GTK_BOX(ctx->encoding_overlay), ctx->encoding_label, TRUE, TRUE, 0);
+    gtk_overlay_add_overlay(GTK_OVERLAY(overlay), ctx->encoding_overlay);
+    
     // Create and position spinner
     ctx->spinner = gtk_spinner_new();
     gtk_widget_set_halign(ctx->spinner, GTK_ALIGN_CENTER);
     gtk_widget_set_valign(ctx->spinner, GTK_ALIGN_CENTER);
     gtk_overlay_add_overlay(GTK_OVERLAY(overlay), ctx->spinner);
-    gtk_widget_hide(ctx->spinner);  // Initially hidden
 
     // Load SAM model
     if (!load_sam_model(ctx)) {
@@ -545,6 +608,9 @@ int main(int argc, char* argv[]) {
 
     // Show all widgets
     gtk_widget_show_all(ctx->window);
+    gtk_widget_hide(ctx->encoding_overlay);  // Initially hidden
+    gtk_widget_hide(ctx->encoding_label);    // Initially hidden
+    gtk_widget_hide(ctx->spinner);  // Initially hidden
     
     // Start main loop
     gtk_main();
