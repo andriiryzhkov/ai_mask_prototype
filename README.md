@@ -6,9 +6,27 @@ Prototype based on Meta's [Segment Anything Model](https://github.com/facebookre
 
 The prototype currently supports only the [ViT-B SAM model checkpoint](https://huggingface.co/facebook/sam-vit-base).
 
-## Build
+## Features
 
-Clone repository
+- Complete SAM model conversion pipeline to GGML format
+- Optimized C/C++ implementation for inference
+- Support for positive and negative point prompts
+- Cross-platform compatibility (Linux, Windows, macOS)
+- Sample applications demonstrating real-world usage
+
+## Prerequisites
+
+- CMake >= 3.12
+- C++14 compatible compiler
+- GGML library
+- OpenCV (for demo applications)
+- Python 3.7+ (for conversion scripts and python demo app)
+- PyTorch (for model conversion)
+
+
+## Installation
+
+1. Clone the repository:
 
 ```bash
 git clone git@github.com:andriiryzhkov/ai_mask_prototype.git
@@ -16,30 +34,31 @@ cd ai_mask_prototype
 git submodule update --init --recursive
 ```
 
-Install python dependencies in a virtual environment
+2. Create python virtual environment and install dependencies:
 
 ```bash
 poetry install
 ```
 
-Download PTH model
+3. Download PTH model:
 
 ```bash
 curl --create-dirs --output-dir weights -O https://dl.fbaipublicfiles.com/segment_anything/sam_vit_b_01ec64.pth
 ```
 
-Convert PTH model to ggml
+4. Convert PTH model to ggml format:
 
 ```bash
 poetry run python scripts/convert-pth-to-ggml.py weights/sam_vit_b_01ec64.pth checkpoints/ 1
 ```
 
-Build
+5. Build the project:
 
 ```bash
 ./build.sh
 ```
-or
+
+or manually:
 
 ```bash
 mkdir build && cd build
@@ -49,30 +68,36 @@ cmake --build . --config Release -j 8
 
 ## Run
 
-Run command line inference
+1. Run command line inference:
 
 ```bash
-./build/bin/sam_cli -t 12 -i ./images/in/example1.jpg -o ./images/out/example1 -p "2070, 1170, 1" -m ./weights/sam_vit_b-ggml-model-f16.bin 
-./build/bin/sam_cli -t 12 -i ./images/in/example2.jpg -o ./images/out/example2 -p "650, 700, 1" -m ./weights/sam_vit_b-ggml-model-f16.bin 
+./build/bin/sam_cli -t 12 -i ./images/in/example1.jpg -o ./images/out/example1 -p "2070, 1170, 1" 
+./build/bin/sam_cli -t 12 -i ./images/in/example2.jpg -o ./images/out/example2 -p "650, 700, 1" 
 ```
 
-or 
+or on Windows:
 
 ```bash
 ./build/bin/sam_cli.exe -i ./images/in/example1.jpg -o ./images/out/example1 -p "2070, 1170, 1"
 ./build/bin/sam_cli.exe -i ./images/in/example2.jpg -o ./images/out/example2 -p "650, 700, 1" 
 ```
 
-GTK3 application
+2. GTK3 application:
 
 ```bash
 ./build/bin/sam_gui
 ```
 
-or
+or on Windows:
 
 ```bash
 ./build/bin/sam_gui.exe
+```
+
+3. Python demo application with original SAM implementation:
+
+```bash
+poetry run python scripts/demo.py
 ```
 
 ## Sample images
